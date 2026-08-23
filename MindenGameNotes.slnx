@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/MindenGameNotes/MindenGameNotes.csproj" />
+  <Project Path="tests/MindenGameNotes.Smoke/MindenGameNotes.Smoke.csproj" />
+</Solution>
