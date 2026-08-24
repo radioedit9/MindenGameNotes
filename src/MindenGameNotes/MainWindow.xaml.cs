@@ -18,6 +18,9 @@ public partial class MainWindow : Window
     private BuilderWorkspace workspace = new();
     private GameNotesProject project = new();
     private bool settingProject;
+    private WeeklyProductionHandoff? currentProductionHandoff;
+    private WeeklyProductionComparison? productionComparison;
+    private sealed record ProductionPageRow(PageProductionStatus Status, string ChangeLabel, IReadOnlyList<string> ChangedRequirementKeys);
 
     public MainWindow()
     {
@@ -55,6 +58,7 @@ public partial class MainWindow : Window
         UpdateGameInformationView();
         UpdateDefensiveView();
         UpdateWeeklyInformationView();
+        UpdateProductionHandoffView();
         RenderPreview();
     }
 
@@ -274,6 +278,35 @@ public partial class MainWindow : Window
     {
         WeeklyRequirementsGrid.ItemsSource = (WeeklyReadinessGrid.SelectedItem as IPageInformationPackage)?.Requirements;
         if (WeeklyReadinessGrid.SelectedItem is IPageInformationPackage page) SupplementalDetails.Text = JsonSerializer.Serialize(page, page.GetType(), ReviewJsonOptions());
+    }
+
+    private void UpdateProductionHandoffView()
+    {
+        if (ProductionPagesGrid is null || ProductionClearanceText is null) return;
+        if (currentProductionHandoff is null || currentProductionHandoff.InformationPackage.ProjectId != project.Id)
+        {
+            currentProductionHandoff = WeeklyProductionHandoffBuilder.Build(WeeklyGameNotesInformationAssembler.Build(workspace, project)); productionComparison = null;
+        }
+        var changed = productionComparison?.ChangedPages.ToDictionary(x => x.PageNumber) ?? [];
+        ProductionPagesGrid.ItemsSource = currentProductionHandoff.Pages.Select(x => new ProductionPageRow(x, changed.ContainsKey(x.PageNumber) ? "Changed" : productionComparison is null ? "Baseline" : "Unchanged", changed.TryGetValue(x.PageNumber, out var change) ? change.ChangedRequirementKeys : [])).ToList();
+        ProductionClearanceText.Text = currentProductionHandoff.IsClearedForFinalPublication ? "CLEARED FOR FINAL PUBLICATION COMPOSITION" : $"NOT CLEARED • {currentProductionHandoff.RemainingBlockers.Count} publication blocker(s) • {currentProductionHandoff.Pages.Count(x => x.State == PageProductionState.ProductionUsable)} production-usable page(s)";
+        ProductionClearanceText.Foreground = currentProductionHandoff.IsClearedForFinalPublication ? Brushes.DarkGreen : Brushes.DarkRed;
+    }
+
+    private void RebuildProductionHandoff_Click(object sender, RoutedEventArgs e)
+    {
+        var next = WeeklyProductionHandoffBuilder.Build(WeeklyGameNotesInformationAssembler.Build(workspace, project));
+        productionComparison = currentProductionHandoff is not null && currentProductionHandoff.InformationPackage.ProjectId == next.InformationPackage.ProjectId ? WeeklyProductionHandoffBuilder.Compare(currentProductionHandoff, next) : null;
+        currentProductionHandoff = next; UpdateProductionHandoffView();
+        StatusText.Text = productionComparison is null ? "Production handoff baseline built" : $"Production handoff rebuilt • {productionComparison.ChangedPages.Count} affected page(s)";
+    }
+
+    private void ProductionPagesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ProductionPagesGrid.SelectedItem is not ProductionPageRow row) return;
+        var status = row.Status;
+        ProductionDetails.Text = $"PAGE {status.PageNumber} • {status.Purpose} • {status.State}\nChange: {row.ChangeLabel}\nChanged requirements: {string.Join(", ", row.ChangedRequirementKeys)}\nFingerprint: {status.Fingerprint}\n\nWORK BLOCKERS\n{string.Join("\n", status.WorkBlockingRequirements.Select(Describe))}\n\nPUBLICATION BLOCKERS\n{string.Join("\n", status.PublicationBlockingRequirements.Select(Describe))}\n\nADVISORIES\n{string.Join("\n", status.Advisories.Select(Describe))}\n\nRESOLVED AUTHORITY / PROVENANCE\n{string.Join("\n", status.Information.Requirements.SelectMany(x => x.Authorities).Select(x => $"{x.Domain} {x.AuthorityId} • staged {x.StagedAuthorityId} • import {x.ImportRecordId} • document {x.ExpectedDocumentId} • family {x.SourceFamilyId}"))}";
+        static string Describe(InformationRequirementStatus x) => $"{x.RequirementKey}: {x.Availability}/{x.Severity} • {x.Message}";
     }
 
     private void WeeklyRequirementsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
