@@ -9,6 +9,7 @@ public partial class MainWindow : Window
 {
     private readonly ProjectStore store = new();
     private readonly ImportService importer = new();
+    private readonly GameInformationWorkflow gameWorkflow = new();
     private BuilderWorkspace workspace = new();
     private GameNotesProject project = new();
     private bool settingProject;
@@ -41,9 +42,11 @@ public partial class MainWindow : Window
         workspace.Normalize();
         DataContext = null; DataContext = project;
         ExpectedDocumentsGrid.ItemsSource = null; ExpectedDocumentsGrid.ItemsSource = project.ExpectedDocuments;
+        StagedGameReportsGrid.ItemsSource = null; StagedGameReportsGrid.ItemsSource = project.StagedGameReports;
         ReadinessText.Text = project.IsReady ? "READY" : "NOT READY";
         ReadinessText.Foreground = project.IsReady ? Brushes.DarkGreen : Brushes.DarkRed;
         ReadinessIssues.ItemsSource = project.ReadinessIssues;
+        UpdateGameInformationView();
         RenderPreview();
     }
 
@@ -135,6 +138,53 @@ public partial class MainWindow : Window
     {
         foreach (var player in project.Players) player.Verified = true;
         SetProject(); StatusText.Text = "All player rows marked verified; project readiness is unchanged";
+    }
+
+    private async void ImportSingleGame_Click(object sender, RoutedEventArgs e)
+    {
+        CommitGrids();
+        if (ExpectedDocumentsGrid.SelectedItem is not ExpectedSourceDocument document) { MessageBox.Show("Select the expected single-game document on the Expected sources tab first."); return; }
+        var family = workspace.SourceFamilies.FirstOrDefault(x => x.Id == document.SourceFamilyId); if (family is null) { MessageBox.Show("The selected document has no valid source family."); return; }
+        var path = document.ResolvePath(family);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) { var dialog = new OpenFileDialog { Filter = "Game Stats PDF (*.pdf)|*.pdf" }; if (dialog.ShowDialog() != true) return; path = dialog.FileName; document.ResolvedPath = path; Refresh(document); }
+        try { var staged = await importer.ImportSingleGameAsync(path, project, document, family); await store.SaveAsync(workspace); SetProject(); StagedGameReportsGrid.SelectedItem = staged; StatusText.Text = "Single-game report parsed and pending review; source remains unverified"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void AcceptGameReport_Click(object sender, RoutedEventArgs e) => await ReviewGameReport(false);
+    private async void ReplaceGameReport_Click(object sender, RoutedEventArgs e) => await ReviewGameReport(true);
+    private async Task ReviewGameReport(bool replace)
+    {
+        if (StagedGameReportsGrid.SelectedItem is not StagedSingleGameReport staged) { MessageBox.Show("Select a staged report first."); return; }
+        var source = project.ExpectedDocuments.FirstOrDefault(x => x.Id == staged.ExpectedDocumentId); if (source is null) { MessageBox.Show("The staged report's expected source is unavailable."); return; }
+        var family = workspace.SourceFamilies.FirstOrDefault(x => x.Id == source.SourceFamilyId); if (family is null) { MessageBox.Show("The staged report's source family is unavailable."); return; }
+        try { gameWorkflow.Accept(project, staged, source, family, ReviewNote.Text, replace); await store.SaveAsync(workspace); SetProject(); StatusText.Text = replace ? "Accepted report explicitly replaced" : "Report accepted atomically"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void RejectGameReport_Click(object sender, RoutedEventArgs e)
+    {
+        if (StagedGameReportsGrid.SelectedItem is not StagedSingleGameReport staged) { MessageBox.Show("Select a staged report first."); return; }
+        try { gameWorkflow.Reject(staged, ReviewNote.Text); await store.SaveAsync(workspace); SetProject(); StatusText.Text = "Staged report rejected; no authoritative information created"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void CorrectGameReport_Click(object sender, RoutedEventArgs e)
+    {
+        if (StagedGameReportsGrid.SelectedItem is not StagedSingleGameReport staged || string.IsNullOrWhiteSpace(CorrectionField.Text)) { MessageBox.Show("Select a pending report and correction field."); return; }
+        try { gameWorkflow.Correct(staged, CorrectionField.Text, CorrectionValue.Text, ReviewNote.Text); await store.SaveAsync(workspace); UpdateGameInformationView(); StatusText.Text = "Staged correction recorded with original value and note"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private void StagedGameReportsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateGameInformationView();
+
+    private void UpdateGameInformationView()
+    {
+        if (AcceptedSupplyText is null || StagedReportDetails is null) return;
+        var supply = PageOneInformationSupply.Build(project); AcceptedSupplyText.Text = $"PAGE 1 FACTUAL SUPPLY: {supply.Status}" + (supply.Provenance is null ? "" : $" • {supply.Provenance.FileName} • imported {supply.Provenance.ImportedUtc:u}");
+        if (StagedGameReportsGrid.SelectedItem is not StagedSingleGameReport staged) { AcceptGameReportButton.IsEnabled = ReplaceGameReportButton.IsEnabled = false; LinkedSourceStateText.Text = "Linked source: select a staged report"; StagedReportDetails.Text = "Select a staged report to inspect its review sections and provenance."; return; }
+        var source = project.ExpectedDocuments.FirstOrDefault(x => x.Id == staged.ExpectedDocumentId); LinkedSourceStateText.Text = source is null ? "Linked source unavailable" : $"Linked source: {source.Name} • health {source.Status} • verification {source.Verification}"; AcceptGameReportButton.IsEnabled = gameWorkflow.CanAccept(project, staged, source, false); ReplaceGameReportButton.IsEnabled = gameWorkflow.CanAccept(project, staged, source, true);
+        StagedReportDetails.Text = $"{staged.State}: {staged.AwayTeam} vs {staged.HomeTeam} • {staged.GameDate:d} • {staged.Site}\nFinal: Minden {staged.MindenScore}, {staged.Opponent} {staged.OpponentScore}\n\nPERIOD SCORING\n{string.Join("\n", staged.PeriodScores.Select(x => $"{x.Label}: Minden {x.MindenPoints}, opponent {x.OpponentPoints}"))}\n\nSCORING PLAYS\n{string.Join("\n", staged.ScoringPlays.Select(x => $"{x.Period} {x.Clock} {x.Description} {x.ScoreAfterPlay}"))}\n\nTEAM STATISTICS\n{string.Join("\n", staged.TeamStatistics.Select(x => $"{x.Label}: Minden {x.Minden.Reported}; opponent {x.Opponent.Reported}"))}\n\nRUSHING\n{string.Join("\n", staged.Rushing.Select(x => x.Reported))}\n\nPASSING\n{string.Join("\n", staged.Passing.Select(x => x.Reported))}\n\nRECEIVING\n{string.Join("\n", staged.Receiving.Select(x => x.Reported))}\n\nProvenance: import {staged.ImportRecordId}; expected document {staged.ExpectedDocumentId}; source family {staged.SourceFamilyId}\nIssues:\n{string.Join("\n", staged.Issues.Select(x => $"[{x.Severity}] {x.Message}"))}\nCorrections:\n{string.Join("\n", staged.Corrections.Select(x => $"{x.FieldKey}: '{x.OriginalValue}' → '{x.CorrectedValue}' ({x.Note})"))}";
     }
 
     private async void Export_Click(object sender, RoutedEventArgs e)

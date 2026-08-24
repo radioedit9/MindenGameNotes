@@ -4,7 +4,7 @@ namespace MindenGameNotes;
 
 public sealed class BuilderWorkspace
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public Guid? ActiveProjectId { get; set; }
     public List<SourceFamilyConfiguration> SourceFamilies { get; set; } = [];
@@ -44,6 +44,9 @@ public sealed class GameNotesProject
     public List<GameResult> Schedule { get; set; } = [];
     public List<ExpectedSourceDocument> ExpectedDocuments { get; set; } = [];
     public List<ImportRecord> Imports { get; set; } = [];
+    public List<StagedSingleGameReport> StagedGameReports { get; set; } = [];
+    public List<CompletedGame> CompletedGames { get; set; } = [];
+    public Guid? CurrentAcceptedGameId { get; set; }
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
 
     [JsonIgnore] private HashSet<Guid> sourceFamilyIds = [];
@@ -63,10 +66,20 @@ public sealed class GameNotesProject
     internal void Normalize(HashSet<Guid> knownSourceFamilyIds)
     {
         if (Id == Guid.Empty) Id = Guid.NewGuid();
-        PageOne ??= new(); Players ??= []; Schedule ??= []; ExpectedDocuments ??= []; Imports ??= [];
+        PageOne ??= new(); Players ??= []; Schedule ??= []; ExpectedDocuments ??= []; Imports ??= []; StagedGameReports ??= []; CompletedGames ??= [];
         sourceFamilyIds = knownSourceFamilyIds;
         foreach (var document in ExpectedDocuments) if (document.Id == Guid.Empty) document.Id = Guid.NewGuid();
         foreach (var import in Imports) { if (import.Id == Guid.Empty) import.Id = Guid.NewGuid(); if (import.ProjectId == Guid.Empty) import.ProjectId = Id; }
+        foreach (var staged in StagedGameReports)
+        {
+            if (staged is null) throw new InvalidDataException("A staged report entry is null.");
+            staged.PeriodScores ??= []; staged.ScoringPlays ??= []; staged.TeamStatistics ??= []; staged.Rushing ??= []; staged.Passing ??= []; staged.Receiving ??= []; staged.Issues ??= []; staged.Corrections ??= [];
+        }
+        foreach (var game in CompletedGames)
+        {
+            if (game is null) throw new InvalidDataException("A completed game entry is null.");
+            game.PeriodScores ??= []; game.ScoringPlays ??= []; game.TeamStatistics ??= []; game.Rushing ??= []; game.Passing ??= []; game.Receiving ??= []; game.AcceptedIssues ??= []; game.Corrections ??= [];
+        }
     }
 
     private IReadOnlyList<string> BuildReadinessIssues()
@@ -116,6 +129,7 @@ public sealed class ExpectedSourceDocument : IJsonOnDeserializing, IJsonOnDeseri
     public string Name { get; set; } = "";
     public bool IsApplicable { get; set; } = true;
     public bool IsPending { get; set; }
+    public bool IsSingleGameReport { get; set; }
     public string ExpectedLocator
     {
         get => expectedLocator;
@@ -231,4 +245,128 @@ public sealed class ImportRecord
     public DateTime ImportedUtc { get; set; }
     public string Kind { get; set; } = "";
     public int RowCount { get; set; }
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ReportReviewState { PendingReview, Accepted, Rejected }
+[JsonConverter(typeof(JsonStringEnumConverter))]
+public enum InformationIssueSeverity { Blocking, Advisory, Informational }
+
+public sealed class ReportedStatValue
+{
+    public string Reported { get; set; } = "";
+    public string? AcceptedValue { get; set; }
+    public decimal? Numeric { get; set; }
+    [JsonIgnore] public string Effective => AcceptedValue ?? Reported;
+}
+
+public sealed class PeriodScore
+{
+    public int Order { get; set; }
+    public string Label { get; set; } = "";
+    public int MindenPoints { get; set; }
+    public int OpponentPoints { get; set; }
+}
+
+public sealed class ScoringPlay
+{
+    public int Period { get; set; }
+    public string Clock { get; set; } = "";
+    public string Team { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string ScoreAfterPlay { get; set; } = "";
+}
+
+public sealed class TeamGameStatistic
+{
+    public string Key { get; set; } = "";
+    public string Label { get; set; } = "";
+    public ReportedStatValue Minden { get; set; } = new();
+    public ReportedStatValue Opponent { get; set; } = new();
+}
+
+public abstract class OffensivePerformance
+{
+    public string Player { get; set; } = "";
+    public string Reported { get; set; } = "";
+}
+public sealed class RushingPerformance : OffensivePerformance { public int Attempts { get; set; } public int Yards { get; set; } }
+public sealed class PassingPerformance : OffensivePerformance { public int Completions { get; set; } public int Attempts { get; set; } public int Interceptions { get; set; } public int Yards { get; set; } }
+public sealed class ReceivingPerformance : OffensivePerformance { public int Receptions { get; set; } public int Yards { get; set; } }
+
+public sealed class InformationValidationIssue
+{
+    public InformationIssueSeverity Severity { get; set; }
+    public string Code { get; set; } = "";
+    public string Section { get; set; } = "";
+    public string Message { get; set; } = "";
+}
+
+public sealed class StagedCorrection
+{
+    public string FieldKey { get; set; } = "";
+    public string OriginalValue { get; set; } = "";
+    public string CorrectedValue { get; set; } = "";
+    public string Note { get; set; } = "";
+    public DateTime CorrectedUtc { get; set; } = DateTime.UtcNow;
+}
+
+public sealed class StagedSingleGameReport
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProjectId { get; set; }
+    public Guid ExpectedDocumentId { get; set; }
+    public Guid SourceFamilyId { get; set; }
+    public Guid ImportRecordId { get; set; }
+    public int? ApplicableSeason { get; set; }
+    public int? ApplicableWeek { get; set; }
+    public ReportReviewState State { get; set; } = ReportReviewState.PendingReview;
+    public DateTime ParsedUtc { get; set; } = DateTime.UtcNow;
+    public DateTime? ReviewedUtc { get; set; }
+    public DateTime? AcceptedUtc { get; set; }
+    public string ReviewNote { get; set; } = "";
+    public string HomeTeam { get; set; } = "";
+    public string AwayTeam { get; set; } = "";
+    public string Opponent { get; set; } = "";
+    public DateTime? GameDate { get; set; }
+    public string Site { get; set; } = "";
+    public int? MindenScore { get; set; }
+    public int? OpponentScore { get; set; }
+    public List<PeriodScore> PeriodScores { get; set; } = [];
+    public List<ScoringPlay> ScoringPlays { get; set; } = [];
+    public List<TeamGameStatistic> TeamStatistics { get; set; } = [];
+    public List<RushingPerformance> Rushing { get; set; } = [];
+    public List<PassingPerformance> Passing { get; set; } = [];
+    public List<ReceivingPerformance> Receiving { get; set; } = [];
+    public List<InformationValidationIssue> Issues { get; set; } = [];
+    public List<StagedCorrection> Corrections { get; set; } = [];
+    [JsonIgnore] public bool HasBlockingIssues => Issues.Any(x => x.Severity == InformationIssueSeverity.Blocking);
+    [JsonIgnore] public bool HasAdvisories => Issues.Any(x => x.Severity == InformationIssueSeverity.Advisory);
+}
+
+public sealed class CompletedGame
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid ProjectId { get; set; }
+    public Guid StagedReportId { get; set; }
+    public Guid ExpectedDocumentId { get; set; }
+    public Guid SourceFamilyId { get; set; }
+    public Guid ImportRecordId { get; set; }
+    public int? Season { get; set; }
+    public int? Week { get; set; }
+    public string Opponent { get; set; } = "";
+    public DateTime GameDate { get; set; }
+    public string Site { get; set; } = "";
+    public int MindenScore { get; set; }
+    public int OpponentScore { get; set; }
+    public List<PeriodScore> PeriodScores { get; set; } = [];
+    public List<ScoringPlay> ScoringPlays { get; set; } = [];
+    public List<TeamGameStatistic> TeamStatistics { get; set; } = [];
+    public List<RushingPerformance> Rushing { get; set; } = [];
+    public List<PassingPerformance> Passing { get; set; } = [];
+    public List<ReceivingPerformance> Receiving { get; set; } = [];
+    public List<InformationValidationIssue> AcceptedIssues { get; set; } = [];
+    public List<StagedCorrection> Corrections { get; set; } = [];
+    public DateTime AcceptedUtc { get; set; }
+    public bool IsCurrentAuthority { get; set; } = true;
 }
