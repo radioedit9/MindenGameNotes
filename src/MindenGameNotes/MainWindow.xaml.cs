@@ -10,6 +10,8 @@ public partial class MainWindow : Window
     private readonly ProjectStore store = new();
     private readonly ImportService importer = new();
     private readonly GameInformationWorkflow gameWorkflow = new();
+    private readonly DefensiveWorkbookImportService defensiveImporter = new();
+    private readonly DefensiveInformationWorkflow defensiveWorkflow = new();
     private BuilderWorkspace workspace = new();
     private GameNotesProject project = new();
     private bool settingProject;
@@ -43,10 +45,12 @@ public partial class MainWindow : Window
         DataContext = null; DataContext = project;
         ExpectedDocumentsGrid.ItemsSource = null; ExpectedDocumentsGrid.ItemsSource = project.ExpectedDocuments;
         StagedGameReportsGrid.ItemsSource = null; StagedGameReportsGrid.ItemsSource = project.StagedGameReports;
+        DefensiveWorkbooksGrid.ItemsSource = null; DefensiveWorkbooksGrid.ItemsSource = project.StagedDefensiveWorkbooks;
         ReadinessText.Text = project.IsReady ? "READY" : "NOT READY";
         ReadinessText.Foreground = project.IsReady ? Brushes.DarkGreen : Brushes.DarkRed;
         ReadinessIssues.ItemsSource = project.ReadinessIssues;
         UpdateGameInformationView();
+        UpdateDefensiveView();
         RenderPreview();
     }
 
@@ -138,6 +142,69 @@ public partial class MainWindow : Window
     {
         foreach (var player in project.Players) player.Verified = true;
         SetProject(); StatusText.Text = "All player rows marked verified; project readiness is unchanged";
+    }
+
+    private async void ImportDefensive_Click(object sender, RoutedEventArgs e)
+    {
+        CommitGrids();
+        if (ExpectedDocumentsGrid.SelectedItem is not ExpectedSourceDocument document) { MessageBox.Show("Select the expected defensive workbook on the Expected sources tab first."); return; }
+        var family = workspace.SourceFamilies.FirstOrDefault(x => x.Id == document.SourceFamilyId); if (family is null) { MessageBox.Show("The selected document has no valid source family."); return; }
+        var path = document.ResolvePath(family);
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) { var dialog = new OpenFileDialog { Filter = "Defensive workbook (*.xlsx)|*.xlsx" }; if (dialog.ShowDialog() != true) return; path = dialog.FileName; document.ResolvedPath = path; Refresh(document); }
+        try { document.IsDefensiveWorkbook = true; var staged = defensiveImporter.Import(path, project, document, family); await store.SaveAsync(workspace); SetProject(); DefensiveWorkbooksGrid.SelectedItem = staged; StatusText.Text = "Defensive workbook parsed into independent game/TOTALS staging; source remains unverified"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void AcceptDefensiveGame_Click(object sender, RoutedEventArgs e) => await ReviewDefensiveGame(false);
+    private async void ReplaceDefensiveGame_Click(object sender, RoutedEventArgs e) => await ReviewDefensiveGame(true);
+    private async Task ReviewDefensiveGame(bool replace)
+    {
+        if (DefensiveWorkbooksGrid.SelectedItem is not StagedDefensiveWorkbook workbook || DefensiveGamesGrid.SelectedItem is not StagedDefensiveGame game) { MessageBox.Show("Select a staged defensive workbook and game."); return; }
+        if (!TryDefensiveSource(workbook, out var source, out var family)) return;
+        try { defensiveWorkflow.AcceptGame(project, workbook, game, source!, family!, DefensiveReviewNote.Text, replace); await store.SaveAsync(workspace); SetProject(); StatusText.Text = replace ? "Defensive game authority explicitly replaced" : "Defensive game accepted"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+    private async void RejectDefensiveGame_Click(object sender, RoutedEventArgs e)
+    {
+        if (DefensiveGamesGrid.SelectedItem is not StagedDefensiveGame game) { MessageBox.Show("Select a staged defensive game."); return; }
+        try { defensiveWorkflow.RejectGame(game, DefensiveReviewNote.Text); await store.SaveAsync(workspace); SetProject(); StatusText.Text = "Defensive game staging rejected"; } catch (Exception ex) { ShowError(ex); }
+    }
+    private async void AcceptDefensiveTotals_Click(object sender, RoutedEventArgs e) => await ReviewDefensiveTotals(false);
+    private async void ReplaceDefensiveTotals_Click(object sender, RoutedEventArgs e) => await ReviewDefensiveTotals(true);
+    private async Task ReviewDefensiveTotals(bool replace)
+    {
+        if (DefensiveWorkbooksGrid.SelectedItem is not StagedDefensiveWorkbook workbook || workbook.SeasonTotals is null) { MessageBox.Show("Select a staged workbook with a TOTALS section."); return; }
+        if (!TryDefensiveSource(workbook, out var source, out var family)) return;
+        try { defensiveWorkflow.AcceptSeasonTotals(project, workbook, source!, family!, DefensiveReviewNote.Text, replace); await store.SaveAsync(workspace); SetProject(); StatusText.Text = replace ? "Defensive TOTALS authority explicitly replaced" : "Defensive TOTALS accepted"; } catch (Exception ex) { ShowError(ex); }
+    }
+    private async void RejectDefensiveTotals_Click(object sender, RoutedEventArgs e)
+    {
+        if (DefensiveWorkbooksGrid.SelectedItem is not StagedDefensiveWorkbook { SeasonTotals: { } totals }) { MessageBox.Show("Select a staged workbook with a TOTALS section."); return; }
+        try { defensiveWorkflow.RejectSeasonTotals(totals, DefensiveReviewNote.Text); await store.SaveAsync(workspace); SetProject(); StatusText.Text = "Defensive TOTALS staging rejected"; } catch (Exception ex) { ShowError(ex); }
+    }
+    private bool TryDefensiveSource(StagedDefensiveWorkbook workbook, out ExpectedSourceDocument? source, out SourceFamilyConfiguration? family)
+    {
+        source = project.ExpectedDocuments.FirstOrDefault(x => x.Id == workbook.ExpectedDocumentId); var familyId = source?.SourceFamilyId; family = familyId is null ? null : workspace.SourceFamilies.FirstOrDefault(x => x.Id == familyId);
+        if (source is not null && family is not null) return true; MessageBox.Show("The staged defensive workbook's source provenance is unavailable."); return false;
+    }
+    private void DefensiveWorkbooksGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        DefensiveGamesGrid.ItemsSource = (DefensiveWorkbooksGrid.SelectedItem as StagedDefensiveWorkbook)?.Games; DefensiveGamesGrid.SelectedItem = null; UpdateDefensiveView();
+    }
+    private void DefensiveGamesGrid_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateDefensiveView();
+    private void InspectDefensiveTotals_Click(object sender, RoutedEventArgs e) { DefensiveGamesGrid.SelectedItem = null; UpdateDefensiveView(); }
+    private void UpdateDefensiveView()
+    {
+        if (DefensiveDetails is null || DefensiveSupplyText is null) return;
+        var supply = AcceptedDefensiveInformationSupply.Build(project, project.Season ?? 0); DefensiveSupplyText.Text = $"ACCEPTED DEFENSIVE SUPPLY: {supply.Games.Count} game(s); TOTALS {(supply.SeasonTotals is null ? "unavailable" : "available")}; {supply.Provenance.Count} provenance record(s)";
+        if (DefensiveWorkbooksGrid.SelectedItem is not StagedDefensiveWorkbook workbook) { DefensiveDetails.Text = "Select a staged defensive workbook to inspect its independent game and TOTALS sections."; return; }
+        if (DefensiveGamesGrid.SelectedItem is StagedDefensiveGame game)
+        {
+            DefensiveDetails.Text = $"GAME: {game.State} • {game.Season} Week {game.Week} • {game.SiteIndicator} {game.Opponent}\nWorksheet: {game.WorksheetName} • Players: {game.Players.Count}\nProvenance: import {workbook.ImportRecordId}; document {workbook.ExpectedDocumentId}; family {workbook.SourceFamilyId}\n\nIssues:\n{string.Join("\n", game.Issues.Select(x => $"[{x.Severity}] {x.Code}: {x.Message}"))}\n\nPlayers:\n{string.Join("\n", game.Players.Select(FormatLine))}"; return;
+        }
+        var totals = workbook.SeasonTotals; DefensiveDetails.Text = $"WORKBOOK: parsed {workbook.ParsedUtc:u} • game sections {workbook.Games.Count}\nWorkbook issues:\n{string.Join("\n", workbook.Issues.Select(x => $"[{x.Severity}] {x.Code}: {x.Message}"))}\n\nTOTALS: {(totals is null ? "not recognizable" : $"{totals.State} • season {totals.Season} • {totals.Players.Count} players\nIssues:\n{string.Join("\n", totals.Issues.Select(x => $"[{x.Severity}] {x.Code}: {x.Message}"))}\n\nPlayers:\n{string.Join("\n", totals.Players.Select(FormatLine))}")}";
+        static string FormatLine(DefensiveStatLine x) => $"#{x.JerseyNumber} {x.PlayerName} — Solo {Display(x.Solo)}, Ast {Display(x.Assisted)}, Total {Display(x.Total)}, TFL {Display(x.TacklesForLoss)}, Sack {Display(x.Sacks)}, Hurry {Display(x.QuarterbackHurries)}, PBU {Display(x.PassBreakups)}, INT {Display(x.Interceptions)}, FF {Display(x.ForcedFumbles)}, FR {Display(x.FumbleRecoveries)}, BEP {Display(x.BlockedExtraPoints)}, BK {Display(x.BlockedKicks)}";
+        static string Display(DefensiveSourceValue value) => value.State switch { DefensiveCellState.Absent => "<absent>", DefensiveCellState.PresentBlank => "<blank>", DefensiveCellState.Numeric => value.Numeric?.ToString() ?? "<invalid>", _ => $"<invalid:{value.Raw}>" };
     }
 
     private async void ImportSingleGame_Click(object sender, RoutedEventArgs e)

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.RegularExpressions;
 
 namespace MindenGameNotes;
 
@@ -34,15 +35,18 @@ public sealed class ProjectStore
             BuilderWorkspace workspace;
             if (TryGet(root, "SchemaVersion", out var schema))
             {
-                if (!schema.TryGetInt32(out var version) || version is not (1 or BuilderWorkspace.CurrentSchemaVersion))
-                    throw new InvalidDataException($"Unsupported workspace schema version '{schema}'; expected 1 or {BuilderWorkspace.CurrentSchemaVersion}. The file was not changed.");
+                if (!schema.TryGetInt32(out var version) || version is not (1 or 2 or BuilderWorkspace.CurrentSchemaVersion))
+                    throw new InvalidDataException($"Unsupported workspace schema version '{schema}'; expected 1, 2, or {BuilderWorkspace.CurrentSchemaVersion}. The file was not changed.");
                 ValidateCurrentWorkspace(root);
                 if (version == 1 && ContainsWp2Authority(root)) throw new InvalidDataException("A schema-1 workspace cannot contain WP 2 authority fields and was not changed.");
-                if (version == BuilderWorkspace.CurrentSchemaVersion) ValidateNoExplicitNullWp2Collections(root);
+                if (version < 3 && ContainsWp3Authority(root)) throw new InvalidDataException($"A schema-{version} workspace cannot contain WP 3 authority fields and was not changed.");
+                if (version >= 2) ValidateNoExplicitNullWp2Collections(root);
+                if (version == BuilderWorkspace.CurrentSchemaVersion) ValidateRequiredWp3Shape(root);
                 try { workspace = JsonSerializer.Deserialize<BuilderWorkspace>(json, JsonOptions) ?? throw new InvalidDataException("The workspace could not be read."); }
                 catch (JsonException ex) { throw new InvalidDataException($"The schema-{version} workspace is invalid and was not changed: {path}", ex); }
-                if (version == 1) workspace.SchemaVersion = BuilderWorkspace.CurrentSchemaVersion;
-                else ValidatePersistedWp2IdentityBeforeNormalization(workspace);
+                if (version >= 2) ValidatePersistedWp2IdentityBeforeNormalization(workspace);
+                if (version == 3) ValidatePersistedWp3IdentityBeforeNormalization(workspace);
+                if (version < BuilderWorkspace.CurrentSchemaVersion) workspace.SchemaVersion = BuilderWorkspace.CurrentSchemaVersion;
             }
             else if (IsRecognizableLegacyProject(root))
             {
@@ -58,6 +62,7 @@ public sealed class ProjectStore
                 throw new InvalidDataException($"The workspace structure is incomplete or invalid and was not changed: {path}", ex);
             }
             ValidateWp2Integrity(workspace);
+            ValidateWp3Integrity(workspace);
             RefreshSourceHealth(workspace);
             return workspace;
         }
@@ -67,8 +72,10 @@ public sealed class ProjectStore
     {
         workspace.UpdatedUtc = DateTime.UtcNow;
         ValidatePersistedWp2IdentityBeforeNormalization(workspace);
+        ValidatePersistedWp3IdentityBeforeNormalization(workspace);
         workspace.Normalize();
         ValidateWp2Integrity(workspace);
+        ValidateWp3Integrity(workspace);
         foreach (var project in workspace.Projects) project.UpdatedUtc = workspace.UpdatedUtc;
         var directory = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
@@ -143,6 +150,14 @@ public sealed class ProjectStore
         return false;
     }
 
+    private static bool ContainsWp3Authority(JsonElement root)
+    {
+        if (!TryGet(root, "Projects", out var projects) || projects.ValueKind != JsonValueKind.Array) return false;
+        foreach (var project in projects.EnumerateArray())
+            if (project.ValueKind == JsonValueKind.Object && (TryGet(project, "StagedDefensiveWorkbooks", out _) || TryGet(project, "AcceptedDefensiveGames", out _) || TryGet(project, "AcceptedDefensiveSeasonTotals", out _))) return true;
+        return false;
+    }
+
     private static void ValidateNoExplicitNullWp2Collections(JsonElement root)
     {
         if (!TryGet(root, "Projects", out var projects) || projects.ValueKind != JsonValueKind.Array) return;
@@ -161,6 +176,59 @@ public sealed class ProjectStore
             }
         }
     }
+
+    private static void ValidateRequiredWp3Shape(JsonElement root)
+    {
+        if (!TryGet(root, "Projects", out var projects) || projects.ValueKind != JsonValueKind.Array) return;
+        foreach (var project in projects.EnumerateArray())
+        {
+            var staged = Required(project, "StagedDefensiveWorkbooks", JsonValueKind.Array, "schema-3 project");
+            var acceptedGames = Required(project, "AcceptedDefensiveGames", JsonValueKind.Array, "schema-3 project");
+            var acceptedTotals = Required(project, "AcceptedDefensiveSeasonTotals", JsonValueKind.Array, "schema-3 project");
+            foreach (var workbook in staged.EnumerateArray())
+            {
+                RequiredMembers(workbook, "staged defensive workbook", "Id", "ProjectId", "ExpectedDocumentId", "SourceFamilyId", "ImportRecordId", "ParsedUtc", "Games", "SeasonTotals", "Issues");
+                var games = Required(workbook, "Games", JsonValueKind.Array, "staged defensive workbook"); Required(workbook, "Issues", JsonValueKind.Array, "staged defensive workbook");
+                foreach (var game in games.EnumerateArray()) ValidateGameShape(game, "staged defensive game", accepted: false);
+                var totals = Member(workbook, "SeasonTotals", "staged defensive workbook"); if (totals.ValueKind == JsonValueKind.Object) ValidateTotalsShape(totals, "staged defensive totals", accepted: false); else if (totals.ValueKind != JsonValueKind.Null) throw new InvalidDataException("SeasonTotals must be an object or null in persisted WP 3 staging.");
+            }
+            foreach (var game in acceptedGames.EnumerateArray()) ValidateGameShape(game, "accepted defensive game", accepted: true);
+            foreach (var totals in acceptedTotals.EnumerateArray()) ValidateTotalsShape(totals, "accepted defensive totals", accepted: true);
+        }
+    }
+
+    private static void ValidateGameShape(JsonElement game, string owner, bool accepted)
+    {
+        if (accepted) RequiredMembers(game, owner, "Id", "ProjectId", "StagedWorkbookId", "StagedSectionId", "ExpectedDocumentId", "SourceFamilyId", "ImportRecordId", "Season", "Week", "Opponent", "SiteIndicator", "Players", "AcceptedIssues", "AcceptanceNote", "AcceptedUtc", "IsCurrentAuthority");
+        else RequiredMembers(game, owner, "Id", "Season", "Week", "Opponent", "SiteIndicator", "WorksheetName", "IdentityText", "State", "ReviewedUtc", "AcceptedUtc", "ReviewNote", "Players", "Issues");
+        var players = Required(game, "Players", JsonValueKind.Array, owner); var issues = Required(game, accepted ? "AcceptedIssues" : "Issues", JsonValueKind.Array, owner);
+        foreach (var player in players.EnumerateArray()) ValidatePlayerShape(player, owner); foreach (var issue in issues.EnumerateArray()) ValidateIssueShape(issue, owner);
+    }
+
+    private static void ValidateTotalsShape(JsonElement totals, string owner, bool accepted)
+    {
+        if (accepted) RequiredMembers(totals, owner, "Id", "ProjectId", "StagedWorkbookId", "StagedSectionId", "ExpectedDocumentId", "SourceFamilyId", "ImportRecordId", "Season", "Players", "AcceptedIssues", "AcceptanceNote", "AcceptedUtc", "IsCurrentAuthority");
+        else RequiredMembers(totals, owner, "Id", "Season", "WorksheetName", "IdentityText", "State", "ReviewedUtc", "AcceptedUtc", "ReviewNote", "Players", "Issues");
+        var players = Required(totals, "Players", JsonValueKind.Array, owner); var issues = Required(totals, accepted ? "AcceptedIssues" : "Issues", JsonValueKind.Array, owner);
+        foreach (var player in players.EnumerateArray()) ValidatePlayerShape(player, owner); foreach (var issue in issues.EnumerateArray()) ValidateIssueShape(issue, owner);
+    }
+
+    private static void ValidatePlayerShape(JsonElement player, string owner)
+    {
+        RequiredMembers(player, owner, "PlayerName", "JerseyNumber", "WorksheetName", "SourceRow", "Solo", "Assisted", "Total", "TacklesForLoss", "Sacks", "QuarterbackHurries", "PassBreakups", "Interceptions", "ForcedFumbles", "FumbleRecoveries", "BlockedExtraPoints", "BlockedKicks");
+        foreach (var name in new[] { "Solo", "Assisted", "Total", "TacklesForLoss", "Sacks", "QuarterbackHurries", "PassBreakups", "Interceptions", "ForcedFumbles", "FumbleRecoveries", "BlockedExtraPoints", "BlockedKicks" })
+        {
+            var value = Required(player, name, JsonValueKind.Object, owner); RequiredMembers(value, $"{owner} {name}", "State", "CellReference", "Raw", "Numeric", "Formula");
+            Required(value, "State", JsonValueKind.String, owner); Required(value, "CellReference", JsonValueKind.String, owner); Required(value, "Raw", JsonValueKind.String, owner);
+            var numeric = Member(value, "Numeric", owner); if (numeric.ValueKind is not (JsonValueKind.Number or JsonValueKind.Null)) throw new InvalidDataException($"Numeric must be a number or null in persisted {owner}.");
+            var formula = Member(value, "Formula", owner); if (formula.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) throw new InvalidDataException($"Formula must be a string or null in persisted {owner}.");
+        }
+    }
+
+    private static void ValidateIssueShape(JsonElement issue, string owner) => RequiredMembers(issue, owner, "Severity", "Code", "Section", "Message");
+    private static void RequiredMembers(JsonElement element, string owner, params string[] names) { if (element.ValueKind != JsonValueKind.Object) throw new InvalidDataException($"A {owner} must be an object."); foreach (var name in names) Member(element, name, owner); }
+    private static JsonElement Member(JsonElement element, string name, string owner) { if (!TryGet(element, name, out var value)) throw new InvalidDataException($"Required member {name} is missing from persisted {owner}."); return value; }
+    private static JsonElement Required(JsonElement element, string name, JsonValueKind kind, string owner) { var value = Member(element, name, owner); if (value.ValueKind != kind) throw new InvalidDataException($"Required member {name} in persisted {owner} must be {kind} and cannot be null."); return value; }
 
     private static void ValidateWp2Integrity(BuilderWorkspace workspace)
     {
@@ -224,6 +292,100 @@ public sealed class ProjectStore
             foreach (var import in (project.Imports ?? []).Where(x => x is not null && importIds.Contains(x.Id)))
                 if (import is null || import.Id == Guid.Empty || import.ProjectId == Guid.Empty || import.ExpectedDocumentId == Guid.Empty || import.SourceFamilyId == Guid.Empty)
                     throw new InvalidDataException("A persisted import used by WP 2 authority has an empty identity, ownership, or provenance ID and was not changed.");
+        }
+    }
+
+    private static void ValidateWp3Integrity(BuilderWorkspace workspace)
+    {
+        var familyIds = workspace.SourceFamilies.Select(x => x.Id).ToHashSet();
+        foreach (var project in workspace.Projects)
+        {
+            if (project.StagedDefensiveWorkbooks.Any(x => x is null) || project.AcceptedDefensiveGames.Any(x => x is null) || project.AcceptedDefensiveSeasonTotals.Any(x => x is null)) throw new InvalidDataException("WP 3 collections contain null entries.");
+            RequireUnique(project.StagedDefensiveWorkbooks.Select(x => x.Id), "staged defensive workbook"); RequireUnique(project.AcceptedDefensiveGames.Select(x => x.Id), "accepted defensive game"); RequireUnique(project.AcceptedDefensiveSeasonTotals.Select(x => x.Id), "accepted defensive season totals");
+            var documents = project.ExpectedDocuments.ToDictionary(x => x.Id); var imports = project.Imports.ToDictionary(x => x.Id); var workbooks = project.StagedDefensiveWorkbooks.ToDictionary(x => x.Id);
+            foreach (var workbook in project.StagedDefensiveWorkbooks)
+            {
+                if (workbook.Id == Guid.Empty || workbook.ProjectId != project.Id || workbook.Games is null || workbook.Issues is null || workbook.Games.Any(x => x is null) || workbook.Issues.Any(x => x is null)) throw new InvalidDataException("A staged defensive workbook has invalid identity, ownership, or nested collections.");
+                if (!documents.TryGetValue(workbook.ExpectedDocumentId, out var document) || document.SourceFamilyId != workbook.SourceFamilyId || !familyIds.Contains(workbook.SourceFamilyId)) throw new InvalidDataException("A staged defensive workbook has orphaned source provenance.");
+                if (!imports.TryGetValue(workbook.ImportRecordId, out var import) || import.ProjectId != project.Id || import.ExpectedDocumentId != workbook.ExpectedDocumentId || import.SourceFamilyId != workbook.SourceFamilyId || import.Kind != "XLSX-DEFENSIVE") throw new InvalidDataException("A staged defensive workbook has missing or inconsistent import provenance.");
+                var sectionSeasons = workbook.Games.Select(x => x.Season).Concat(workbook.SeasonTotals is null ? [] : new[] { workbook.SeasonTotals.Season }).Where(x => x is not null).Distinct().ToList(); if (sectionSeasons.Any(x => x != import.ApplicableSeason)) throw new InvalidDataException("A staged defensive section season contradicts its import provenance.");
+                RequireUnique(workbook.Games.Select(x => x.Id).Concat(workbook.SeasonTotals is null ? [] : new[] { workbook.SeasonTotals.Id }), "staged defensive section");
+                foreach (var game in workbook.Games)
+                {
+                    ValidateDefensiveSection(game.Players, game.Issues, "staged defensive game");
+                    var related = project.AcceptedDefensiveGames.Where(x => x.StagedWorkbookId == workbook.Id && x.StagedSectionId == game.Id).ToList();
+                    if (game.State == ReportReviewState.Accepted && related.Count != 1) throw new InvalidDataException("An accepted defensive game section must have exactly one accepted snapshot.");
+                    if (game.State != ReportReviewState.Accepted && related.Count != 0) throw new InvalidDataException("Pending or rejected defensive game staging cannot establish authority.");
+                }
+                if (workbook.SeasonTotals is { } totals)
+                {
+                    ValidateDefensiveSection(totals.Players, totals.Issues, "staged defensive totals");
+                    if (totals.Season is not null && !TotalsIdentityMatches(totals.IdentityText, totals.Season.Value)) throw new InvalidDataException("Staged defensive totals season contradicts its source identity.");
+                    var related = project.AcceptedDefensiveSeasonTotals.Where(x => x.StagedWorkbookId == workbook.Id && x.StagedSectionId == totals.Id).ToList();
+                    if (totals.State == ReportReviewState.Accepted && related.Count != 1) throw new InvalidDataException("Accepted defensive season totals must have exactly one accepted snapshot.");
+                    if (totals.State != ReportReviewState.Accepted && related.Count != 0) throw new InvalidDataException("Pending or rejected defensive totals staging cannot establish authority.");
+                }
+            }
+            foreach (var game in project.AcceptedDefensiveGames)
+            {
+                ValidateDefensiveSection(game.Players, game.AcceptedIssues, "accepted defensive game");
+                if (game.Id == Guid.Empty || game.ProjectId != project.Id || game.Season is < 1900 or > 2200 || game.Week <= 0 || string.IsNullOrWhiteSpace(game.Opponent) || project.Season != game.Season) throw new InvalidDataException("An accepted defensive game has invalid identity, season association, or ownership.");
+                if (!workbooks.TryGetValue(game.StagedWorkbookId, out var workbook) || workbook.Games.SingleOrDefault(x => x.Id == game.StagedSectionId) is not { State: ReportReviewState.Accepted } staged) throw new InvalidDataException("An accepted defensive game does not reference accepted staging.");
+                ValidateDefensiveProvenance(game.ProjectId, game.ExpectedDocumentId, game.SourceFamilyId, game.ImportRecordId, project, workbook);
+                if (game.Season != staged.Season || game.Week != staged.Week || GameInformationWorkflow.NormalizeOpponent(game.Opponent) != GameInformationWorkflow.NormalizeOpponent(staged.Opponent)) throw new InvalidDataException("Accepted defensive game identity contradicts its staging snapshot.");
+                if (!Equivalent(game.Players, staged.Players) || !Equivalent(game.AcceptedIssues, staged.Issues) || game.AcceptanceNote != staged.ReviewNote || game.AcceptedUtc != staged.AcceptedUtc) throw new InvalidDataException("Accepted defensive game content contradicts its immutable staging snapshot.");
+            }
+            foreach (var totals in project.AcceptedDefensiveSeasonTotals)
+            {
+                ValidateDefensiveSection(totals.Players, totals.AcceptedIssues, "accepted defensive season totals");
+                if (totals.Id == Guid.Empty || totals.ProjectId != project.Id || totals.Season is < 1900 or > 2200 || project.Season != totals.Season) throw new InvalidDataException("Accepted defensive season totals have invalid identity, season association, or ownership.");
+                if (!workbooks.TryGetValue(totals.StagedWorkbookId, out var workbook) || workbook.SeasonTotals is not { State: ReportReviewState.Accepted } staged || staged.Id != totals.StagedSectionId) throw new InvalidDataException("Accepted defensive totals do not reference accepted staging.");
+                ValidateDefensiveProvenance(totals.ProjectId, totals.ExpectedDocumentId, totals.SourceFamilyId, totals.ImportRecordId, project, workbook);
+                if (totals.Season != staged.Season) throw new InvalidDataException("Accepted defensive totals season contradicts staging.");
+                if (!Equivalent(totals.Players, staged.Players) || !Equivalent(totals.AcceptedIssues, staged.Issues) || totals.AcceptanceNote != staged.ReviewNote || totals.AcceptedUtc != staged.AcceptedUtc) throw new InvalidDataException("Accepted defensive totals content contradicts its immutable staging snapshot.");
+            }
+            foreach (var group in project.AcceptedDefensiveGames.GroupBy(x => (x.Season, x.Week)))
+            {
+                if (group.Count(x => x.IsCurrentAuthority) != 1) throw new InvalidDataException("Each accepted defensive season/week must have exactly one current authority.");
+                if (group.Select(x => GameInformationWorkflow.NormalizeOpponent(x.Opponent)).Distinct().Count() != 1) throw new InvalidDataException("Defensive authority history has conflicting opponents for one season/week.");
+            }
+            foreach (var group in project.AcceptedDefensiveSeasonTotals.GroupBy(x => x.Season)) if (group.Count(x => x.IsCurrentAuthority) != 1) throw new InvalidDataException("Each accepted defensive season-total history must have exactly one current authority.");
+        }
+    }
+
+    private static void ValidateDefensiveProvenance(Guid projectId, Guid documentId, Guid familyId, Guid importId, GameNotesProject project, StagedDefensiveWorkbook workbook)
+    {
+        if (projectId != project.Id || documentId != workbook.ExpectedDocumentId || familyId != workbook.SourceFamilyId || importId != workbook.ImportRecordId) throw new InvalidDataException("Accepted defensive provenance contradicts staging.");
+    }
+
+    private static bool Equivalent<T>(T left, T right) => JsonSerializer.Serialize(left, JsonOptions) == JsonSerializer.Serialize(right, JsonOptions);
+    private static bool TotalsIdentityMatches(string identity, int season) { var match = Regex.Match(identity ?? "", @"^\s*(\d{4})\s*-\s*TOTALS\s*$", RegexOptions.IgnoreCase); return match.Success && int.TryParse(match.Groups[1].Value, out var parsed) && parsed == season; }
+
+    private static void ValidateDefensiveSection(List<DefensiveStatLine> players, List<InformationValidationIssue> issues, string owner)
+    {
+        if (players is null || issues is null || players.Any(x => x is null) || issues.Any(x => x is null)) throw new InvalidDataException($"A {owner} contains null required information.");
+        if (players.Count == 0) throw new InvalidDataException($"A {owner} must contain at least one defensive player row.");
+        foreach (var player in players)
+        {
+            if (string.IsNullOrWhiteSpace(player.PlayerName) || player.SourceRow <= 0 || string.IsNullOrWhiteSpace(player.WorksheetName)) throw new InvalidDataException($"A {owner} contains an invalid player/source identity.");
+            var values = new[] { player.Solo, player.Assisted, player.Total, player.TacklesForLoss, player.Sacks, player.QuarterbackHurries, player.PassBreakups, player.Interceptions, player.ForcedFumbles, player.FumbleRecoveries, player.BlockedExtraPoints, player.BlockedKicks };
+            if (values.Any(x => x is null || x.State == DefensiveCellState.Numeric && x.Numeric is null || x.State != DefensiveCellState.Numeric && x.Numeric is not null)) throw new InvalidDataException($"A {owner} contains an inconsistent defensive source value.");
+        }
+    }
+
+    private static void ValidatePersistedWp3IdentityBeforeNormalization(BuilderWorkspace workspace)
+    {
+        foreach (var project in workspace.Projects ?? [])
+        {
+            if (project is null || ((project.StagedDefensiveWorkbooks?.Count ?? 0) == 0 && (project.AcceptedDefensiveGames?.Count ?? 0) == 0 && (project.AcceptedDefensiveSeasonTotals?.Count ?? 0) == 0)) continue;
+            if (project.Id == Guid.Empty) throw new InvalidDataException("Persisted WP 3 authority has an empty project ID and was not changed.");
+            foreach (var workbook in project.StagedDefensiveWorkbooks ?? [])
+            {
+                if (workbook is null || workbook.Id == Guid.Empty || workbook.ProjectId == Guid.Empty || workbook.ExpectedDocumentId == Guid.Empty || workbook.SourceFamilyId == Guid.Empty || workbook.ImportRecordId == Guid.Empty) throw new InvalidDataException("Persisted defensive staging has an empty authority or provenance ID and was not changed.");
+                if ((workbook.Games ?? []).Any(x => x is null || x.Id == Guid.Empty) || workbook.SeasonTotals is { Id: var id } && id == Guid.Empty) throw new InvalidDataException("Persisted defensive staging has an empty section ID and was not changed.");
+            }
+            foreach (var item in (project.AcceptedDefensiveGames ?? []).Select(x => (x?.Id ?? Guid.Empty, x?.ProjectId ?? Guid.Empty, x?.StagedWorkbookId ?? Guid.Empty, x?.StagedSectionId ?? Guid.Empty, x?.ExpectedDocumentId ?? Guid.Empty, x?.SourceFamilyId ?? Guid.Empty, x?.ImportRecordId ?? Guid.Empty)).Concat((project.AcceptedDefensiveSeasonTotals ?? []).Select(x => (x?.Id ?? Guid.Empty, x?.ProjectId ?? Guid.Empty, x?.StagedWorkbookId ?? Guid.Empty, x?.StagedSectionId ?? Guid.Empty, x?.ExpectedDocumentId ?? Guid.Empty, x?.SourceFamilyId ?? Guid.Empty, x?.ImportRecordId ?? Guid.Empty))))
+                if (item.Item1 == Guid.Empty || item.Item2 == Guid.Empty || item.Item3 == Guid.Empty || item.Item4 == Guid.Empty || item.Item5 == Guid.Empty || item.Item6 == Guid.Empty || item.Item7 == Guid.Empty) throw new InvalidDataException("Persisted accepted defensive authority has an empty identity or provenance ID and was not changed.");
         }
     }
 

@@ -4,7 +4,7 @@ namespace MindenGameNotes;
 
 public sealed class BuilderWorkspace
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public Guid? ActiveProjectId { get; set; }
     public List<SourceFamilyConfiguration> SourceFamilies { get; set; } = [];
@@ -47,6 +47,9 @@ public sealed class GameNotesProject
     public List<StagedSingleGameReport> StagedGameReports { get; set; } = [];
     public List<CompletedGame> CompletedGames { get; set; } = [];
     public Guid? CurrentAcceptedGameId { get; set; }
+    public List<StagedDefensiveWorkbook> StagedDefensiveWorkbooks { get; set; } = [];
+    public List<AcceptedDefensiveGame> AcceptedDefensiveGames { get; set; } = [];
+    public List<AcceptedDefensiveSeasonTotals> AcceptedDefensiveSeasonTotals { get; set; } = [];
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
 
     [JsonIgnore] private HashSet<Guid> sourceFamilyIds = [];
@@ -66,7 +69,7 @@ public sealed class GameNotesProject
     internal void Normalize(HashSet<Guid> knownSourceFamilyIds)
     {
         if (Id == Guid.Empty) Id = Guid.NewGuid();
-        PageOne ??= new(); Players ??= []; Schedule ??= []; ExpectedDocuments ??= []; Imports ??= []; StagedGameReports ??= []; CompletedGames ??= [];
+        PageOne ??= new(); Players ??= []; Schedule ??= []; ExpectedDocuments ??= []; Imports ??= []; StagedGameReports ??= []; CompletedGames ??= []; StagedDefensiveWorkbooks ??= []; AcceptedDefensiveGames ??= []; AcceptedDefensiveSeasonTotals ??= [];
         sourceFamilyIds = knownSourceFamilyIds;
         foreach (var document in ExpectedDocuments) if (document.Id == Guid.Empty) document.Id = Guid.NewGuid();
         foreach (var import in Imports) { if (import.Id == Guid.Empty) import.Id = Guid.NewGuid(); if (import.ProjectId == Guid.Empty) import.ProjectId = Id; }
@@ -80,6 +83,15 @@ public sealed class GameNotesProject
             if (game is null) throw new InvalidDataException("A completed game entry is null.");
             game.PeriodScores ??= []; game.ScoringPlays ??= []; game.TeamStatistics ??= []; game.Rushing ??= []; game.Passing ??= []; game.Receiving ??= []; game.AcceptedIssues ??= []; game.Corrections ??= [];
         }
+        foreach (var workbook in StagedDefensiveWorkbooks)
+        {
+            if (workbook is null) throw new InvalidDataException("A staged defensive workbook entry is null.");
+            workbook.Games ??= []; workbook.Issues ??= [];
+            foreach (var game in workbook.Games) { game.Players ??= []; game.Issues ??= []; }
+            if (workbook.SeasonTotals is not null) { workbook.SeasonTotals.Players ??= []; workbook.SeasonTotals.Issues ??= []; }
+        }
+        foreach (var game in AcceptedDefensiveGames) { game.Players ??= []; game.AcceptedIssues ??= []; }
+        foreach (var totals in AcceptedDefensiveSeasonTotals) { totals.Players ??= []; totals.AcceptedIssues ??= []; }
     }
 
     private IReadOnlyList<string> BuildReadinessIssues()
@@ -130,6 +142,7 @@ public sealed class ExpectedSourceDocument : IJsonOnDeserializing, IJsonOnDeseri
     public bool IsApplicable { get; set; } = true;
     public bool IsPending { get; set; }
     public bool IsSingleGameReport { get; set; }
+    public bool IsDefensiveWorkbook { get; set; }
     public string ExpectedLocator
     {
         get => expectedLocator;
