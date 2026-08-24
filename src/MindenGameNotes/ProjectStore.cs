@@ -35,17 +35,20 @@ public sealed class ProjectStore
             BuilderWorkspace workspace;
             if (TryGet(root, "SchemaVersion", out var schema))
             {
-                if (!schema.TryGetInt32(out var version) || version is not (1 or 2 or BuilderWorkspace.CurrentSchemaVersion))
-                    throw new InvalidDataException($"Unsupported workspace schema version '{schema}'; expected 1, 2, or {BuilderWorkspace.CurrentSchemaVersion}. The file was not changed.");
+                if (!schema.TryGetInt32(out var version) || version is not (1 or 2 or 3 or BuilderWorkspace.CurrentSchemaVersion))
+                    throw new InvalidDataException($"Unsupported workspace schema version '{schema}'; expected 1 through {BuilderWorkspace.CurrentSchemaVersion}. The file was not changed.");
                 ValidateCurrentWorkspace(root);
                 if (version == 1 && ContainsWp2Authority(root)) throw new InvalidDataException("A schema-1 workspace cannot contain WP 2 authority fields and was not changed.");
                 if (version < 3 && ContainsWp3Authority(root)) throw new InvalidDataException($"A schema-{version} workspace cannot contain WP 3 authority fields and was not changed.");
+                if (version < 4 && ContainsWp4Authority(root)) throw new InvalidDataException($"A schema-{version} workspace cannot contain WP 4 authority fields and was not changed.");
                 if (version >= 2) ValidateNoExplicitNullWp2Collections(root);
-                if (version == BuilderWorkspace.CurrentSchemaVersion) ValidateRequiredWp3Shape(root);
+                if (version >= 3) ValidateRequiredWp3Shape(root);
+                if (version == BuilderWorkspace.CurrentSchemaVersion) ValidateRequiredWp4Shape(root);
                 try { workspace = JsonSerializer.Deserialize<BuilderWorkspace>(json, JsonOptions) ?? throw new InvalidDataException("The workspace could not be read."); }
                 catch (JsonException ex) { throw new InvalidDataException($"The schema-{version} workspace is invalid and was not changed: {path}", ex); }
                 if (version >= 2) ValidatePersistedWp2IdentityBeforeNormalization(workspace);
-                if (version == 3) ValidatePersistedWp3IdentityBeforeNormalization(workspace);
+                if (version >= 3) ValidatePersistedWp3IdentityBeforeNormalization(workspace);
+                if (version == 4) ValidatePersistedWp4IdentityBeforeNormalization(workspace);
                 if (version < BuilderWorkspace.CurrentSchemaVersion) workspace.SchemaVersion = BuilderWorkspace.CurrentSchemaVersion;
             }
             else if (IsRecognizableLegacyProject(root))
@@ -63,6 +66,7 @@ public sealed class ProjectStore
             }
             ValidateWp2Integrity(workspace);
             ValidateWp3Integrity(workspace);
+            ValidateWp4Integrity(workspace);
             RefreshSourceHealth(workspace);
             return workspace;
         }
@@ -73,9 +77,11 @@ public sealed class ProjectStore
         workspace.UpdatedUtc = DateTime.UtcNow;
         ValidatePersistedWp2IdentityBeforeNormalization(workspace);
         ValidatePersistedWp3IdentityBeforeNormalization(workspace);
+        ValidatePersistedWp4IdentityBeforeNormalization(workspace);
         workspace.Normalize();
         ValidateWp2Integrity(workspace);
         ValidateWp3Integrity(workspace);
+        ValidateWp4Integrity(workspace);
         foreach (var project in workspace.Projects) project.UpdatedUtc = workspace.UpdatedUtc;
         var directory = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
@@ -158,6 +164,12 @@ public sealed class ProjectStore
         return false;
     }
 
+    private static bool ContainsWp4Authority(JsonElement root)
+    {
+        if (!TryGet(root, "Projects", out var projects) || projects.ValueKind != JsonValueKind.Array) return false;
+        return projects.EnumerateArray().Any(project => project.ValueKind == JsonValueKind.Object && (TryGet(project, "StagedSupplementalSections", out _) || TryGet(project, "AcceptedSupplementalSections", out _) || TryGet(project, "DefensiveSeasonTotalsAuthorityId", out _)));
+    }
+
     private static void ValidateNoExplicitNullWp2Collections(JsonElement root)
     {
         if (!TryGet(root, "Projects", out var projects) || projects.ValueKind != JsonValueKind.Array) return;
@@ -194,6 +206,65 @@ public sealed class ProjectStore
             }
             foreach (var game in acceptedGames.EnumerateArray()) ValidateGameShape(game, "accepted defensive game", accepted: true);
             foreach (var totals in acceptedTotals.EnumerateArray()) ValidateTotalsShape(totals, "accepted defensive totals", accepted: true);
+        }
+    }
+
+    private static void ValidateRequiredWp4Shape(JsonElement root)
+    {
+        var projects = Required(root, "Projects", JsonValueKind.Array, "schema-4 workspace");
+        foreach (var project in projects.EnumerateArray())
+        {
+            var staged = Required(project, "StagedSupplementalSections", JsonValueKind.Array, "schema-4 project");
+            var accepted = Required(project, "AcceptedSupplementalSections", JsonValueKind.Array, "schema-4 project");
+            var defensiveSelection = Member(project, "DefensiveSeasonTotalsAuthorityId", "schema-4 project"); if (defensiveSelection.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) throw new InvalidDataException("DefensiveSeasonTotalsAuthorityId must be a GUID or null in schema-4 persistence.");
+            foreach (var section in staged.EnumerateArray()) ValidateSupplementalShape(section, false);
+            foreach (var section in accepted.EnumerateArray()) ValidateSupplementalShape(section, true);
+        }
+    }
+
+    private static void ValidateSupplementalShape(JsonElement section, bool accepted)
+    {
+        var owner = accepted ? "accepted supplemental section" : "staged supplemental section";
+        if (accepted) RequiredMembers(section, owner, "Id", "ProjectId", "StagedSectionId", "Kind", "Season", "Week", "BaselineThroughSeason", "Payload", "Evidence", "AcceptedIssues", "AcceptanceNote", "AcceptedUtc", "IsCurrentAuthority");
+        else RequiredMembers(section, owner, "Id", "ProjectId", "Kind", "Season", "Week", "BaselineThroughSeason", "Payload", "Evidence", "Issues", "State", "ReviewNote", "ParsedUtc", "ReviewedUtc", "AcceptedUtc");
+        var payload = Required(section, "Payload", JsonValueKind.Object, owner); var discriminator = Required(payload, "$type", JsonValueKind.String, owner).GetString();
+        string[] members = discriminator switch
+        {
+            "page1" => ["MindenRecord", "OpponentRecord", "Weather", "OpponentFacts", "SeriesHistory", "WinImplications", "StatsOfWeek", "ByTheNumbers", "PriorSeasonSummary", "SeriesExtremes", "Storyline"],
+            "schedule" => ["TeamOrGroup", "Games"], "ranking" => ["Title", "SourceDate", "Entries", "SourceFooter"], "individual" => ["ProductionLabel", "StatisticalSeason", "Tables"],
+            "playerOfGame" => ["Entries"], "coaching" or "program" => ["BaselineThroughSeason", "Sections"], "teamStats" => ["StatisticalSeason", "ReportLabel", "Rows"],
+            "nerdNotes" => ["EditorialDirection", "Items"], "roster" => ["Team", "Season", "Players"], _ => throw new InvalidDataException($"Unknown supplemental payload discriminator '{discriminator}'.")
+        };
+        RequiredMembers(payload, $"{owner} payload", members);
+        ValidateSupplementalPayloadShape(payload, discriminator!, owner);
+        var evidence = Required(section, "Evidence", JsonValueKind.Array, owner); if (evidence.GetArrayLength() == 0) throw new InvalidDataException($"A persisted {owner} must contain evidence.");
+        foreach (var item in evidence.EnumerateArray()) { RequiredMembers(item, $"{owner} evidence", "Id", "Kind", "ExpectedDocumentId", "SourceFamilyId", "ImportRecordId", "AuthorityName", "SourceLocator", "SourceAsOfUtc", "ApplicableSeason", "ApplicableWeek", "Note"); Required(item, "Id", JsonValueKind.String, owner); Required(item, "Kind", JsonValueKind.String, owner); Required(item, "AuthorityName", JsonValueKind.String, owner); Required(item, "SourceLocator", JsonValueKind.String, owner); Required(item, "Note", JsonValueKind.String, owner); }
+        var issues = Required(section, accepted ? "AcceptedIssues" : "Issues", JsonValueKind.Array, owner); foreach (var issue in issues.EnumerateArray()) ValidateIssueShape(issue, owner);
+    }
+
+    private static void ValidateSupplementalPayloadShape(JsonElement payload, string discriminator, string owner)
+    {
+        void Text(JsonElement x, string name) => Required(x, name, JsonValueKind.String, owner);
+        void Number(JsonElement x, string name) => Required(x, name, JsonValueKind.Number, owner);
+        void Sourced(JsonElement x) { RequiredMembers(x, owner, "Value", "EvidenceId"); Text(x, "Value"); Required(x, "EvidenceId", JsonValueKind.String, owner); }
+        void Row(JsonElement x) { RequiredMembers(x, owner, "Label", "Values", "EvidenceId"); Text(x, "Label"); var values = Required(x, "Values", JsonValueKind.Array, owner); foreach (var value in values.EnumerateArray()) if (value.ValueKind != JsonValueKind.String) throw new InvalidDataException($"Persisted {owner} row values must be strings."); Required(x, "EvidenceId", JsonValueKind.String, owner); }
+        void Rows(JsonElement x, string name) { var rows = Required(x, name, JsonValueKind.Array, owner); foreach (var row in rows.EnumerateArray()) Row(row); }
+        switch (discriminator)
+        {
+            case "page1":
+                Sourced(Required(payload, "MindenRecord", JsonValueKind.Object, owner)); Sourced(Required(payload, "OpponentRecord", JsonValueKind.Object, owner));
+                var weather = Required(payload, "Weather", JsonValueKind.Object, owner); RequiredMembers(weather, owner, "Temperature", "Sky", "Wind", "EvidenceId"); Text(weather, "Temperature"); Text(weather, "Sky"); Text(weather, "Wind"); Required(weather, "EvidenceId", JsonValueKind.String, owner);
+                var facts = Required(payload, "OpponentFacts", JsonValueKind.Object, owner); Rows(facts, "Rows");
+                foreach (var name in new[] { "SeriesHistory", "WinImplications", "StatsOfWeek", "ByTheNumbers" }) { var list = Required(payload, name, JsonValueKind.Array, owner); foreach (var item in list.EnumerateArray()) Sourced(item); }
+                Sourced(Required(payload, "PriorSeasonSummary", JsonValueKind.Object, owner)); Sourced(Required(payload, "SeriesExtremes", JsonValueKind.Object, owner)); Sourced(Required(payload, "Storyline", JsonValueKind.Object, owner)); break;
+            case "schedule": Text(payload, "TeamOrGroup"); foreach (var item in Required(payload, "Games", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Date", "Opponent", "Site", "ResultOrTime", "IsDistrictGame", "EvidenceId"); Required(item, "Date", JsonValueKind.String, owner); Text(item, "Opponent"); Text(item, "Site"); Text(item, "ResultOrTime"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
+            case "ranking": Text(payload, "Title"); Required(payload, "SourceDate", JsonValueKind.String, owner); Text(payload, "SourceFooter"); foreach (var item in Required(payload, "Entries", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Rank", "Team", "Record", "Value", "EvidenceId"); Number(item, "Rank"); Text(item, "Team"); Text(item, "Record"); Text(item, "Value"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
+            case "individual": Text(payload, "ProductionLabel"); Number(payload, "StatisticalSeason"); foreach (var table in Required(payload, "Tables", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(table, owner, "Title", "Columns", "Rows"); Text(table, "Title"); var columns = Required(table, "Columns", JsonValueKind.Array, owner); foreach (var column in columns.EnumerateArray()) if (column.ValueKind != JsonValueKind.String) throw new InvalidDataException("Persisted stat headings must be strings."); Rows(table, "Rows"); } break;
+            case "playerOfGame": foreach (var item in Required(payload, "Entries", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Week", "Player", "Description", "EvidenceId"); Number(item, "Week"); Text(item, "Player"); Text(item, "Description"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
+            case "coaching": case "program": Number(payload, "BaselineThroughSeason"); foreach (var section in Required(payload, "Sections", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(section, owner, "Title", "Rows"); Text(section, "Title"); Rows(section, "Rows"); } break;
+            case "teamStats": Number(payload, "StatisticalSeason"); Text(payload, "ReportLabel"); foreach (var item in Required(payload, "Rows", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Label", "Minden", "Opponent", "EvidenceId"); Text(item, "Label"); Text(item, "Minden"); Text(item, "Opponent"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
+            case "nerdNotes": Text(payload, "EditorialDirection"); foreach (var item in Required(payload, "Items", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Title", "Content", "Disposition", "EvidenceIds", "Verified", "Note"); Text(item, "Title"); Text(item, "Content"); Required(item, "Disposition", JsonValueKind.String, owner); Required(item, "EvidenceIds", JsonValueKind.Array, owner); Text(item, "Note"); } break;
+            case "roster": Text(payload, "Team"); Number(payload, "Season"); foreach (var item in Required(payload, "Players", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "SourceName", "DisplayName", "Number", "Position", "Grade", "EvidenceId"); Text(item, "SourceName"); Text(item, "DisplayName"); Text(item, "Number"); Text(item, "Position"); Text(item, "Grade"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
         }
     }
 
@@ -387,6 +458,70 @@ public sealed class ProjectStore
             foreach (var item in (project.AcceptedDefensiveGames ?? []).Select(x => (x?.Id ?? Guid.Empty, x?.ProjectId ?? Guid.Empty, x?.StagedWorkbookId ?? Guid.Empty, x?.StagedSectionId ?? Guid.Empty, x?.ExpectedDocumentId ?? Guid.Empty, x?.SourceFamilyId ?? Guid.Empty, x?.ImportRecordId ?? Guid.Empty)).Concat((project.AcceptedDefensiveSeasonTotals ?? []).Select(x => (x?.Id ?? Guid.Empty, x?.ProjectId ?? Guid.Empty, x?.StagedWorkbookId ?? Guid.Empty, x?.StagedSectionId ?? Guid.Empty, x?.ExpectedDocumentId ?? Guid.Empty, x?.SourceFamilyId ?? Guid.Empty, x?.ImportRecordId ?? Guid.Empty))))
                 if (item.Item1 == Guid.Empty || item.Item2 == Guid.Empty || item.Item3 == Guid.Empty || item.Item4 == Guid.Empty || item.Item5 == Guid.Empty || item.Item6 == Guid.Empty || item.Item7 == Guid.Empty) throw new InvalidDataException("Persisted accepted defensive authority has an empty identity or provenance ID and was not changed.");
         }
+    }
+
+    private static void ValidatePersistedWp4IdentityBeforeNormalization(BuilderWorkspace workspace)
+    {
+        foreach (var project in workspace.Projects ?? [])
+        {
+            if (project is null || ((project.StagedSupplementalSections?.Count ?? 0) == 0 && (project.AcceptedSupplementalSections?.Count ?? 0) == 0)) continue;
+            if (project.Id == Guid.Empty) throw new InvalidDataException("Persisted WP 4 authority has an empty project ID and was not changed.");
+            foreach (var staged in project.StagedSupplementalSections ?? [])
+                if (staged is null || staged.Id == Guid.Empty || staged.ProjectId == Guid.Empty || staged.Payload is null || staged.Evidence is null || staged.Issues is null)
+                    throw new InvalidDataException("Persisted supplemental staging has an empty identity or required content and was not changed.");
+            foreach (var accepted in project.AcceptedSupplementalSections ?? [])
+                if (accepted is null || accepted.Id == Guid.Empty || accepted.ProjectId == Guid.Empty || accepted.StagedSectionId == Guid.Empty || accepted.Payload is null || accepted.Evidence is null || accepted.AcceptedIssues is null)
+                    throw new InvalidDataException("Persisted accepted supplemental authority has an empty identity or required content and was not changed.");
+        }
+    }
+
+    private static void ValidateWp4Integrity(BuilderWorkspace workspace)
+    {
+        var families = workspace.SourceFamilies.ToDictionary(x => x.Id);
+        var selectableDefensiveTotals = workspace.Projects.SelectMany(x => x.AcceptedDefensiveSeasonTotals).Where(x => x.IsCurrentAuthority).ToDictionary(x => x.Id);
+        foreach (var project in workspace.Projects)
+        {
+            if (project.DefensiveSeasonTotalsAuthorityId is Guid selected && (!selectableDefensiveTotals.TryGetValue(selected, out var selectedTotals) || project.Season is null || selectedTotals.Season != (project.Week == 1 ? project.Season - 1 : project.Season))) throw new InvalidDataException("The WP 4 defensive TOTALS selection is missing, superseded, or inapplicable to the weekly project.");
+            if (project.StagedSupplementalSections.Any(x => x is null) || project.AcceptedSupplementalSections.Any(x => x is null)) throw new InvalidDataException("WP 4 collections contain null entries.");
+            RequireUnique(project.StagedSupplementalSections.Select(x => x.Id), "staged supplemental section"); RequireUnique(project.AcceptedSupplementalSections.Select(x => x.Id), "accepted supplemental section");
+            var stagedById = project.StagedSupplementalSections.ToDictionary(x => x.Id);
+            foreach (var staged in project.StagedSupplementalSections)
+            {
+                ValidateSupplementalContent(project, staged.Kind, staged.Season, staged.Week, staged.BaselineThroughSeason, staged.Payload, staged.Evidence, staged.Issues, families, authority: false);
+                if (staged.ProjectId != project.Id) throw new InvalidDataException("Supplemental staging has invalid project ownership.");
+                if (staged.State == ReportReviewState.Accepted && (staged.AcceptedUtc is null || staged.ReviewedUtc is null) || staged.State != ReportReviewState.Accepted && staged.AcceptedUtc is not null) throw new InvalidDataException("Supplemental staging has invalid acceptance metadata.");
+                var related = project.AcceptedSupplementalSections.Where(x => x.StagedSectionId == staged.Id).ToList();
+                if (staged.State == ReportReviewState.Accepted && related.Count != 1) throw new InvalidDataException("Accepted supplemental staging must have exactly one accepted snapshot.");
+                if (staged.State != ReportReviewState.Accepted && related.Count != 0) throw new InvalidDataException("Pending or rejected supplemental staging cannot establish authority.");
+            }
+            foreach (var accepted in project.AcceptedSupplementalSections)
+            {
+                ValidateSupplementalContent(project, accepted.Kind, accepted.Season, accepted.Week, accepted.BaselineThroughSeason, accepted.Payload, accepted.Evidence, accepted.AcceptedIssues, families, authority: true);
+                if (accepted.ProjectId != project.Id || accepted.AcceptedUtc == default || accepted.AcceptedIssues.Any(x => x.Severity == InformationIssueSeverity.Blocking) || (accepted.AcceptedIssues.Any(x => x.Severity == InformationIssueSeverity.Advisory) || accepted.Evidence.Any(x => x.Kind == SupplementalEvidenceKind.EditorialDecision)) && string.IsNullOrWhiteSpace(accepted.AcceptanceNote) || !stagedById.TryGetValue(accepted.StagedSectionId, out var staged) || staged.State != ReportReviewState.Accepted) throw new InvalidDataException("Accepted supplemental authority has invalid acceptance metadata or does not reference accepted staging.");
+                if (accepted.Kind != staged.Kind || accepted.Season != staged.Season || accepted.Week != staged.Week || accepted.BaselineThroughSeason != staged.BaselineThroughSeason) throw new InvalidDataException("Accepted supplemental identity contradicts staging.");
+                if (!Equivalent(accepted.Payload, staged.Payload) || !Equivalent(accepted.Evidence, staged.Evidence) || !Equivalent(accepted.AcceptedIssues, staged.Issues)) throw new InvalidDataException("Accepted supplemental factual payload, evidence, or accepted issue state contradicts staging.");
+                if (accepted.AcceptedUtc != staged.AcceptedUtc || accepted.AcceptanceNote != staged.ReviewNote) throw new InvalidDataException("Accepted supplemental metadata contradicts the acceptance operation recorded on staging.");
+            }
+            foreach (var group in project.AcceptedSupplementalSections.GroupBy(x => (x.Kind, x.Season, x.Week, x.BaselineThroughSeason)))
+                if (group.Count(x => x.IsCurrentAuthority) != 1) throw new InvalidDataException("Each supplemental authority history must have exactly one current snapshot.");
+        }
+    }
+
+    private static void ValidateSupplementalContent(GameNotesProject project, SupplementalSectionKind kind, int season, int? week, int? baseline, SupplementalPayload payload, List<SupplementalEvidence> evidence, List<InformationValidationIssue> issues, IReadOnlyDictionary<Guid, SourceFamilyConfiguration> families, bool authority)
+    {
+        if (payload is null || evidence is null || issues is null || evidence.Count == 0 || evidence.Any(x => x is null) || issues.Any(x => x is null) || !SupplementalValidation.Matches(kind, payload) || SupplementalValidation.IsEmpty(payload)) throw new InvalidDataException("A supplemental section has invalid or empty required content.");
+        if (season != project.Season || !SupplementalInformationWorkflow.IsSeasonAuthority(kind) && week != project.Week) throw new InvalidDataException("A supplemental section contradicts its project season/week.");
+        RequireUnique(evidence.Select(x => x.Id), "supplemental evidence");
+        var synthetic = new StagedSupplementalSection { ProjectId = project.Id, Kind = kind, Season = season, Week = week, BaselineThroughSeason = baseline, Payload = payload, Evidence = evidence };
+        foreach (var item in evidence)
+        {
+            if (item.Id == Guid.Empty || item.ApplicableSeason != season || !SupplementalInformationWorkflow.IsSeasonAuthority(kind) && item.ApplicableWeek != week) throw new InvalidDataException("Supplemental evidence has invalid applicability.");
+            if (item.Kind == SupplementalEvidenceKind.EditorialDecision) { if (!SupplementalValidation.AllowsEditorial(kind) || string.IsNullOrWhiteSpace(item.AuthorityName) || string.IsNullOrWhiteSpace(item.Note)) throw new InvalidDataException("Editorial evidence is not authorized for this section or lacks its named authority/note."); continue; }
+            var document = project.ExpectedDocuments.FirstOrDefault(x => x.Id == item.ExpectedDocumentId); var import = project.Imports.FirstOrDefault(x => x.Id == item.ImportRecordId);
+            if (document is null || item.SourceFamilyId is not Guid familyId || !families.TryGetValue(familyId, out var family) || document.SourceFamilyId != familyId || import is null || !SupplementalValidation.ImportMatches(import, item, synthetic, document, family)) throw new InvalidDataException("Supplemental evidence has orphaned, inapplicable, or inconsistent source provenance.");
+        }
+        if (SupplementalValidation.RequiresSource(kind) && !evidence.Any(x => x.Kind == SupplementalEvidenceKind.ExpectedSourceDocument) || kind == SupplementalSectionKind.NerdNotes && !evidence.Any(x => x.Kind == SupplementalEvidenceKind.EditorialDecision)) throw new InvalidDataException("Supplemental evidence does not satisfy the section's authority policy.");
+        if (authority && SupplementalValidation.Validate(synthetic, project).Any(x => x.Severity == InformationIssueSeverity.Blocking)) throw new InvalidDataException("Accepted supplemental authority fails its typed content contract.");
     }
 
     private static void RequireUnique(IEnumerable<Guid> ids, string name)

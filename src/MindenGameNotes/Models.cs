@@ -4,7 +4,7 @@ namespace MindenGameNotes;
 
 public sealed class BuilderWorkspace
 {
-    public const int CurrentSchemaVersion = 3;
+    public const int CurrentSchemaVersion = 4;
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public Guid? ActiveProjectId { get; set; }
     public List<SourceFamilyConfiguration> SourceFamilies { get; set; } = [];
@@ -50,6 +50,9 @@ public sealed class GameNotesProject
     public List<StagedDefensiveWorkbook> StagedDefensiveWorkbooks { get; set; } = [];
     public List<AcceptedDefensiveGame> AcceptedDefensiveGames { get; set; } = [];
     public List<AcceptedDefensiveSeasonTotals> AcceptedDefensiveSeasonTotals { get; set; } = [];
+    public List<StagedSupplementalSection> StagedSupplementalSections { get; set; } = [];
+    public List<AcceptedSupplementalSection> AcceptedSupplementalSections { get; set; } = [];
+    public Guid? DefensiveSeasonTotalsAuthorityId { get; set; }
     public DateTime UpdatedUtc { get; set; } = DateTime.UtcNow;
 
     [JsonIgnore] private HashSet<Guid> sourceFamilyIds = [];
@@ -69,7 +72,7 @@ public sealed class GameNotesProject
     internal void Normalize(HashSet<Guid> knownSourceFamilyIds)
     {
         if (Id == Guid.Empty) Id = Guid.NewGuid();
-        PageOne ??= new(); Players ??= []; Schedule ??= []; ExpectedDocuments ??= []; Imports ??= []; StagedGameReports ??= []; CompletedGames ??= []; StagedDefensiveWorkbooks ??= []; AcceptedDefensiveGames ??= []; AcceptedDefensiveSeasonTotals ??= [];
+        PageOne ??= new(); Players ??= []; Schedule ??= []; ExpectedDocuments ??= []; Imports ??= []; StagedGameReports ??= []; CompletedGames ??= []; StagedDefensiveWorkbooks ??= []; AcceptedDefensiveGames ??= []; AcceptedDefensiveSeasonTotals ??= []; StagedSupplementalSections ??= []; AcceptedSupplementalSections ??= [];
         sourceFamilyIds = knownSourceFamilyIds;
         foreach (var document in ExpectedDocuments) if (document.Id == Guid.Empty) document.Id = Guid.NewGuid();
         foreach (var import in Imports) { if (import.Id == Guid.Empty) import.Id = Guid.NewGuid(); if (import.ProjectId == Guid.Empty) import.ProjectId = Id; }
@@ -92,6 +95,8 @@ public sealed class GameNotesProject
         }
         foreach (var game in AcceptedDefensiveGames) { game.Players ??= []; game.AcceptedIssues ??= []; }
         foreach (var totals in AcceptedDefensiveSeasonTotals) { totals.Players ??= []; totals.AcceptedIssues ??= []; }
+        foreach (var staged in StagedSupplementalSections) { staged.Evidence ??= []; staged.Issues ??= []; }
+        foreach (var accepted in AcceptedSupplementalSections) { accepted.Evidence ??= []; accepted.AcceptedIssues ??= []; }
     }
 
     private IReadOnlyList<string> BuildReadinessIssues()

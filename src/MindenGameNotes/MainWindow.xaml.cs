@@ -2,6 +2,8 @@ using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace MindenGameNotes;
 
@@ -12,6 +14,7 @@ public partial class MainWindow : Window
     private readonly GameInformationWorkflow gameWorkflow = new();
     private readonly DefensiveWorkbookImportService defensiveImporter = new();
     private readonly DefensiveInformationWorkflow defensiveWorkflow = new();
+    private readonly SupplementalInformationWorkflow supplementalWorkflow = new();
     private BuilderWorkspace workspace = new();
     private GameNotesProject project = new();
     private bool settingProject;
@@ -51,6 +54,7 @@ public partial class MainWindow : Window
         ReadinessIssues.ItemsSource = project.ReadinessIssues;
         UpdateGameInformationView();
         UpdateDefensiveView();
+        UpdateWeeklyInformationView();
         RenderPreview();
     }
 
@@ -252,6 +256,84 @@ public partial class MainWindow : Window
         if (StagedGameReportsGrid.SelectedItem is not StagedSingleGameReport staged) { AcceptGameReportButton.IsEnabled = ReplaceGameReportButton.IsEnabled = false; LinkedSourceStateText.Text = "Linked source: select a staged report"; StagedReportDetails.Text = "Select a staged report to inspect its review sections and provenance."; return; }
         var source = project.ExpectedDocuments.FirstOrDefault(x => x.Id == staged.ExpectedDocumentId); LinkedSourceStateText.Text = source is null ? "Linked source unavailable" : $"Linked source: {source.Name} • health {source.Status} • verification {source.Verification}"; AcceptGameReportButton.IsEnabled = gameWorkflow.CanAccept(project, staged, source, false); ReplaceGameReportButton.IsEnabled = gameWorkflow.CanAccept(project, staged, source, true);
         StagedReportDetails.Text = $"{staged.State}: {staged.AwayTeam} vs {staged.HomeTeam} • {staged.GameDate:d} • {staged.Site}\nFinal: Minden {staged.MindenScore}, {staged.Opponent} {staged.OpponentScore}\n\nPERIOD SCORING\n{string.Join("\n", staged.PeriodScores.Select(x => $"{x.Label}: Minden {x.MindenPoints}, opponent {x.OpponentPoints}"))}\n\nSCORING PLAYS\n{string.Join("\n", staged.ScoringPlays.Select(x => $"{x.Period} {x.Clock} {x.Description} {x.ScoreAfterPlay}"))}\n\nTEAM STATISTICS\n{string.Join("\n", staged.TeamStatistics.Select(x => $"{x.Label}: Minden {x.Minden.Reported}; opponent {x.Opponent.Reported}"))}\n\nRUSHING\n{string.Join("\n", staged.Rushing.Select(x => x.Reported))}\n\nPASSING\n{string.Join("\n", staged.Passing.Select(x => x.Reported))}\n\nRECEIVING\n{string.Join("\n", staged.Receiving.Select(x => x.Reported))}\n\nProvenance: import {staged.ImportRecordId}; expected document {staged.ExpectedDocumentId}; source family {staged.SourceFamilyId}\nIssues:\n{string.Join("\n", staged.Issues.Select(x => $"[{x.Severity}] {x.Message}"))}\nCorrections:\n{string.Join("\n", staged.Corrections.Select(x => $"{x.FieldKey}: '{x.OriginalValue}' → '{x.CorrectedValue}' ({x.Note})"))}";
+    }
+
+    private void UpdateWeeklyInformationView()
+    {
+        if (WeeklyReadinessGrid is null || SupplementalSectionsGrid is null || WeeklyPackageStatus is null) return;
+        var package = WeeklyGameNotesInformationAssembler.Build(workspace, project);
+        WeeklyReadinessGrid.ItemsSource = null; WeeklyReadinessGrid.ItemsSource = package.Pages;
+        SupplementalKindPicker.ItemsSource = Enum.GetValues<SupplementalSectionKind>(); SupplementalSourcePicker.ItemsSource = project.ExpectedDocuments;
+        SupplementalSectionsGrid.ItemsSource = null; SupplementalSectionsGrid.ItemsSource = project.StagedSupplementalSections;
+        var statSeason = project.Week == 1 ? project.Season - 1 : project.Season; var totals = workspace.Projects.SelectMany(x => x.AcceptedDefensiveSeasonTotals).Where(x => x.IsCurrentAuthority && x.Season == statSeason).ToList(); DefensiveTotalsPicker.ItemsSource = totals; DefensiveTotalsPicker.SelectedItem = totals.FirstOrDefault(x => x.Id == project.DefensiveSeasonTotalsAuthorityId);
+        WeeklyPackageStatus.Text = $"10-PAGE PACKAGE: {package.OverallSeverity} • {package.Requirements.Count(x => x.Severity == ReadinessSeverity.Blocking)} blocking • {package.Requirements.Count(x => x.Severity == ReadinessSeverity.Advisory)} advisory";
+        SupplementalSectionsGrid_SelectionChanged(this, null!);
+    }
+
+    private void WeeklyReadinessGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        WeeklyRequirementsGrid.ItemsSource = (WeeklyReadinessGrid.SelectedItem as IPageInformationPackage)?.Requirements;
+        if (WeeklyReadinessGrid.SelectedItem is IPageInformationPackage page) SupplementalDetails.Text = JsonSerializer.Serialize(page, page.GetType(), ReviewJsonOptions());
+    }
+
+    private void WeeklyRequirementsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (WeeklyRequirementsGrid.SelectedItem is not InformationRequirementStatus requirement) return;
+        var documents = requirement.ExpectedDocumentIds.Select(id => project.ExpectedDocuments.FirstOrDefault(x => x.Id == id)).Where(x => x is not null).Select(x => $"{x!.Name}: {x.Status}/{x.Verification}");
+        SupplementalDetails.Text = $"{requirement.Label} • {requirement.Disposition} • {requirement.Availability} • {requirement.Severity}\n{requirement.Message}\n\nAccepted authority/provenance:\n{string.Join("\n", requirement.Authorities.Select(x => $"{x.Domain} {x.AuthorityId} • staged {x.StagedAuthorityId} • import {x.ImportRecordId} • document {x.ExpectedDocumentId} • family {x.SourceFamilyId} • accepted {x.AcceptedUtc:u}"))}\n\nExpected documents:\n{string.Join("\n", documents)}";
+    }
+
+    private void SupplementalSectionsGrid_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SupplementalDetails is null) return;
+        if (SupplementalSectionsGrid.SelectedItem is not StagedSupplementalSection staged) { SupplementalDetails.Text = "Select typed supplemental staging to inspect its factual payload, evidence, validation issues and provenance."; return; }
+        SupplementalDetails.Text = $"{staged.Kind} • {staged.State} • season {staged.Season} • week {staged.Week?.ToString() ?? "season authority"}\nEvidence:\n{string.Join("\n", staged.Evidence.Select(x => $"{x.Kind}: {x.AuthorityName} {x.SourceLocator} • document {x.ExpectedDocumentId} • import {x.ImportRecordId}"))}\nIssues:\n{string.Join("\n", staged.Issues.Select(x => $"[{x.Severity}] {x.Code}: {x.Message}"))}\n\nTyped factual payload:\n{JsonSerializer.Serialize(staged.Payload, staged.Payload.GetType(), ReviewJsonOptions())}";
+    }
+
+    private void SupplementalKindPicker_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SupplementalKindPicker.SelectedItem is SupplementalSectionKind kind) SupplementalPayloadJson.Text = JsonSerializer.Serialize(SupplementalInformationWorkflow.EmptyPayload(kind), SupplementalInformationWorkflow.EmptyPayload(kind).GetType(), ReviewJsonOptions());
+    }
+
+    private async void StageSupplemental_Click(object sender, RoutedEventArgs e)
+    {
+        if (SupplementalKindPicker.SelectedItem is not SupplementalSectionKind kind) { MessageBox.Show("Select a governed supplemental section kind."); return; }
+        try
+        {
+            var payload = SupplementalInformationWorkflow.ParsePayload(kind, SupplementalPayloadJson.Text); StagedSupplementalSection staged;
+            if (kind == SupplementalSectionKind.NerdNotes) staged = supplementalWorkflow.StageEditorial(project, (NerdNotesPayload)payload, SupplementalEditorialAuthority.Text, SupplementalEvidenceNote.Text);
+            else
+            {
+                if (SupplementalSourcePicker.SelectedItem is not ExpectedSourceDocument document) throw new InvalidOperationException("Select the expected source document for this factual section."); var family = workspace.SourceFamilies.SingleOrDefault(x => x.Id == document.SourceFamilyId) ?? throw new InvalidOperationException("The source family is unavailable.");
+                int? baseline = int.TryParse(SupplementalBaseline.Text, out var parsed) ? parsed : null; staged = supplementalWorkflow.StageSourceBacked(project, kind, payload, document, family, baseline);
+            }
+            await store.SaveAsync(workspace); SetProject(); SupplementalSectionsGrid.SelectedItem = staged; StatusText.Text = "Typed supplemental information staged for review";
+        }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void SelectDefensiveTotals_Click(object sender, RoutedEventArgs e)
+    {
+        if (DefensiveTotalsPicker.SelectedItem is not AcceptedDefensiveSeasonTotals totals) { MessageBox.Show("Select an eligible accepted WP 3 TOTALS authority."); return; }
+        try { project.DefensiveSeasonTotalsAuthorityId = totals.Id; await store.SaveAsync(workspace); SetProject(); StatusText.Text = "WP 3 TOTALS authority explicitly linked for weekly assembly"; } catch (Exception ex) { ShowError(ex); }
+    }
+
+    private static JsonSerializerOptions ReviewJsonOptions() => new() { WriteIndented = true, ReferenceHandler = ReferenceHandler.IgnoreCycles, Converters = { new JsonStringEnumConverter() } };
+
+    private async void AcceptSupplemental_Click(object sender, RoutedEventArgs e) => await ReviewSupplemental(false);
+    private async void ReplaceSupplemental_Click(object sender, RoutedEventArgs e) => await ReviewSupplemental(true);
+    private async Task ReviewSupplemental(bool replace)
+    {
+        if (SupplementalSectionsGrid.SelectedItem is not StagedSupplementalSection staged) { MessageBox.Show("Select staged supplemental information."); return; }
+        try { supplementalWorkflow.Accept(project, staged, workspace.SourceFamilies, SupplementalReviewNote.Text, replace); await store.SaveAsync(workspace); SetProject(); StatusText.Text = replace ? "Supplemental authority explicitly replaced" : "Supplemental information accepted"; }
+        catch (Exception ex) { ShowError(ex); }
+    }
+
+    private async void RejectSupplemental_Click(object sender, RoutedEventArgs e)
+    {
+        if (SupplementalSectionsGrid.SelectedItem is not StagedSupplementalSection staged) { MessageBox.Show("Select staged supplemental information."); return; }
+        try { supplementalWorkflow.Reject(staged, SupplementalReviewNote.Text); await store.SaveAsync(workspace); SetProject(); StatusText.Text = "Supplemental staging rejected"; }
+        catch (Exception ex) { ShowError(ex); }
     }
 
     private async void Export_Click(object sender, RoutedEventArgs e)
