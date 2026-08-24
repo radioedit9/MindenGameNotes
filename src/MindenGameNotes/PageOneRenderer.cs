@@ -20,16 +20,16 @@ public static class PageOneRenderer
         e.Add(new Label("MINDEN HIGH SCHOOL", 125, 9, 370, 29, true, TextAlign.Left, 96));
         e.Add(new Label("GAME NOTES", 125, 46, 370, 31, true, TextAlign.Left, 90));
         e.Add(new Box(505, 8, 96, 73, 1.2)); e.Add(new Box(509, 12, 88, 25, 0, true));
-        e.Add(new Label($"WEEK {d.Week}", 509, 16, 88, 13, true, TextAlign.Center, 87, true));
-        e.Add(new Label("2026", 509, 42, 88, 22, true, TextAlign.Center, 90));
+        e.Add(new Label($"WEEK {p.Week?.ToString() ?? "?"}", 509, 16, 88, 13, true, TextAlign.Center, 87, true));
+        e.Add(new Label(p.Season?.ToString() ?? "YEAR TBD", 509, 42, 88, 22, true, TextAlign.Center, 90));
         e.Add(new Label("SEASON", 509, 65, 88, 11, true, TextAlign.Center, 90));
-        Bar(e, 11, 88, 590, 25, $"MINDEN CRIMSON TIDE ({d.MindenRecord})  at  {d.OpponentTeam} ({d.OpponentRecord})", 15);
-        Bar(e, 11, 113, 590, 20, $"{p.GameDate:dddd, MMMM d, yyyy}   •   {d.Kickoff}   •   {p.Venue.Replace("\r", "").Replace("\n", " • ")}", 10);
+        Bar(e, 11, 88, 590, 25, $"MINDEN CRIMSON TIDE ({d.MindenRecord})  at  {p.Opponent.ToUpperInvariant()} ({d.OpponentRecord})", 15);
+        Bar(e, 11, 113, 590, 20, $"{p.GameDate?.ToString("dddd, MMMM d, yyyy") ?? "DATE TBD"}   •   {p.KickoffDisplay}   •   {p.Venue.Replace("\r", "").Replace("\n", " • ")}", 10);
 
         // Locked three-column upper dashboard.
         const double y1 = 139, h1 = 213; Section(e, 11, y1, 208, h1, "GAME INFORMATION");
         Rows(e, 17, y1 + 31, 197, 15, [
-            ("Date:", p.GameDate.ToString("dddd, MMMM d, yyyy")), ("Kickoff:", d.Kickoff), ("Site:", p.Venue),
+            ("Date:", p.GameDate?.ToString("dddd, MMMM d, yyyy") ?? "TBD"), ("Kickoff:", p.KickoffDisplay), ("Site:", p.Venue),
             ("Radio:", d.Radio), ("Internet:", d.Internet), ("Weather:", d.Weather)
         ], 54, 30);
         Section(e, 228, y1, 174, h1, "MINDEN QUICK FACTS");
@@ -39,7 +39,7 @@ public static class PageOneRenderer
             ("2025 Record:", "5-6"), ("Postseason:", "Bi-District"), ("Head Coach:", "Spencer Heard"), ("Minden Record:", d.CoachMindenRecord), ("Years at Minden:", "14th Season")
         ], 78, 23);
         Section(e, 411, y1, 190, h1, "TONIGHT’S OPPONENT");
-        e.Add(new Label(string.Join("\n", Wrap(d.OpponentTeam, 17)), 420, y1 + 29, 172, 17, true, TextAlign.Center, 88));
+        e.Add(new Label(string.Join("\n", Wrap(p.Opponent.ToUpperInvariant(), 17)), 420, y1 + 29, 172, 17, true, TextAlign.Center, 88));
         Rows(e, 418, y1 + 73, 176, 14, [("Location:", d.OpponentLocation), ("Class / District:", d.OpponentClassDistrict), ("Head Coach:", d.OpponentCoach), ("Years at NW:", d.OpponentCoachTenure), ("2025 Record:", d.OpponentPriorRecord), ("Postseason:", d.OpponentPostseason)], 78, 22);
         e.Add(FeaturePanel(418, y1 + 163, 176, 42)); e.Add(new Label("LAST GAME vs. MINDEN", 422, y1 + 169, 168, 10, true, TextAlign.Center));
         var lm = d.OpponentLastMeeting.Split('|'); e.Add(new Label(lm.ElementAtOrDefault(0) ?? "", 422, y1 + 183, 168, 8, true, TextAlign.Center)); e.Add(new Label(lm.ElementAtOrDefault(1) ?? "", 422, y1 + 194, 168, 8, true, TextAlign.Center));

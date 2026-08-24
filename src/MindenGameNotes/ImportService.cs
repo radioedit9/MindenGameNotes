@@ -8,8 +8,14 @@ namespace MindenGameNotes;
 
 public sealed partial class ImportService
 {
-    public async Task<int> ImportAsync(string path, GameNotesProject project)
+    public async Task<int> ImportAsync(string path, GameNotesProject project, ExpectedSourceDocument document, SourceFamilyConfiguration family)
     {
+        if (!project.ExpectedDocuments.Contains(document)) throw new InvalidOperationException("The selected source document does not belong to the active weekly project.");
+        if (document.SourceFamilyId != family.Id) throw new InvalidOperationException("The selected document does not reference the supplied source family.");
+        var fullPath = Path.GetFullPath(path);
+        var resolvedPath = document.ResolvePath(family);
+        if (string.IsNullOrWhiteSpace(resolvedPath) || !Path.GetFullPath(resolvedPath).Equals(fullPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Resolve the selected document against its current source configuration before importing it.");
         var ext = Path.GetExtension(path).ToLowerInvariant();
         var rows = ext switch
         {
@@ -17,7 +23,23 @@ public sealed partial class ImportService
             ".pdf" => await ImportPdfAsync(path, project),
             _ => throw new NotSupportedException("Choose a .pdf or .xlsx file.")
         };
-        project.Imports.Insert(0, new ImportRecord { FileName = Path.GetFileName(path), ImportedUtc = DateTime.UtcNow, Kind = ext[1..].ToUpperInvariant(), RowCount = rows });
+        document.ResolvedPath = fullPath;
+        document.RefreshStatus(family);
+        document.SetVerified(false);
+        project.Imports.Insert(0, new ImportRecord
+        {
+            ProjectId = project.Id,
+            SourceFamilyId = family.Id,
+            ExpectedDocumentId = document.Id,
+            FileName = Path.GetFileName(fullPath),
+            SourceLocator = fullPath,
+            SourceModifiedUtc = document.SourceModifiedUtc,
+            ApplicableSeason = project.Season,
+            ApplicableWeek = project.Week,
+            ImportedUtc = DateTime.UtcNow,
+            Kind = ext[1..].ToUpperInvariant(),
+            RowCount = rows
+        });
         return rows;
     }
 

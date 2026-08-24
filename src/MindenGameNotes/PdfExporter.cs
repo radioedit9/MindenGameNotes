@@ -122,8 +122,8 @@ public static class PageComposer
 {
     public static List<NotePage> Compose(GameNotesProject p) =>
     [
-        Page("GAME NOTES", p, new[] { $"{p.School} {p.TeamName}", $"vs. {p.Opponent}", p.GameDate.ToString("MMMM d, yyyy"), p.Venue, "", p.Headline, p.Storyline }),
-        Page("MATCHUP AT A GLANCE", p, new[] { $"Minden vs. {p.Opponent}", $"Kickoff: {p.GameDate:h:mm tt}", $"Site: {p.Venue}", "", "WEEKLY STORYLINE", p.Storyline }),
+        Page("GAME NOTES", p, new[] { $"{p.School} {p.TeamName}", $"vs. {p.Opponent}", p.GameDate?.ToString("MMMM d, yyyy") ?? "Date TBD", p.Venue, "", p.Headline, p.Storyline }),
+        Page("MATCHUP AT A GLANCE", p, new[] { $"Minden vs. {p.Opponent}", $"Kickoff: {p.KickoffDisplay}", $"Site: {p.Venue}", "", "WEEKLY STORYLINE", p.Storyline }),
         Page("SEASON SCHEDULE", p, p.Schedule.Count == 0 ? new[] { "No schedule imported." } : p.Schedule.Select(g => $"{g.Date:MMM d}   {g.Opponent,-24} {g.Site,-8} {g.Result}")),
         Page("TEAM LEADERS", p, Leaders(p)),
         Page("OFFENSIVE STATISTICS", p, p.Players.OrderByDescending(x => x.PassingYards + x.RushingYards + x.ReceivingYards).Select(x => $"#{x.Number,-3} {x.Name,-25} {x.Position,-4} Total yards {x.TotalYards}")),
