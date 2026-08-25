@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace MindenGameNotes;
@@ -14,6 +15,21 @@ public enum ReadinessSeverity { Ready, Advisory, Blocking }
 public enum SupplementalEvidenceKind { ExpectedSourceDocument, EditorialDecision }
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum NerdNoteDisposition { Page7, WebSocial, BroadcastResearch, Multiple, Hold, NoPublication }
+[JsonConverter(typeof(StrictStatOfWeekDispositionConverter))]
+public enum StatOfWeekDisposition { Selected, NoSelection }
+public sealed class StrictStatOfWeekDispositionConverter : JsonConverter<StatOfWeekDisposition>
+{
+    public override StatOfWeekDisposition Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.String || !Enum.TryParse<StatOfWeekDisposition>(reader.GetString(), false, out var value) || !Enum.IsDefined(value)) throw new JsonException("Stat of the Week disposition must be Selected or NoSelection.");
+        return value;
+    }
+    public override void Write(Utf8JsonWriter writer, StatOfWeekDisposition value, JsonSerializerOptions options)
+    {
+        if (!Enum.IsDefined(value)) throw new JsonException("Stat of the Week disposition must be Selected or NoSelection.");
+        writer.WriteStringValue(value.ToString());
+    }
+}
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum SupplementalSectionKind
 {
@@ -41,6 +57,14 @@ public sealed class SupplementalEvidence
 }
 
 public sealed class SourcedText { public string Value { get; set; } = ""; public Guid EvidenceId { get; set; } }
+public sealed class StatOfWeekSelection
+{
+    public StatOfWeekDisposition Disposition { get; set; }
+    public string Headline { get; set; } = "";
+    public string DisplayText { get; set; } = "";
+    public List<Guid> SupportingFactEvidenceIds { get; set; } = [];
+    public Guid EditorialEvidenceId { get; set; }
+}
 public sealed class InformationRow { public string Label { get; set; } = ""; public List<string> Values { get; set; } = []; public Guid EvidenceId { get; set; } }
 public sealed class WeatherSnapshot { public string Temperature { get; set; } = ""; public string Sky { get; set; } = ""; public string Wind { get; set; } = ""; public Guid EvidenceId { get; set; } }
 public sealed class OpponentQuickFacts { public List<InformationRow> Rows { get; set; } = []; }
@@ -69,7 +93,7 @@ public abstract class SupplementalPayload { }
 public sealed class Page1WeeklyFactsPayload : SupplementalPayload
 {
     public SourcedText MindenRecord { get; set; } = new(); public SourcedText OpponentRecord { get; set; } = new(); public WeatherSnapshot Weather { get; set; } = new(); public OpponentQuickFacts OpponentFacts { get; set; } = new();
-    public List<SourcedText> SeriesHistory { get; set; } = []; public List<SourcedText> WinImplications { get; set; } = []; public List<SourcedText> StatsOfWeek { get; set; } = []; public List<SourcedText> ByTheNumbers { get; set; } = [];
+    public List<SourcedText> SeriesHistory { get; set; } = []; public List<SourcedText> WinImplications { get; set; } = []; public List<SourcedText> StatsOfWeek { get; set; } = []; public StatOfWeekSelection? StatOfWeekSelection { get; set; } public List<SourcedText> ByTheNumbers { get; set; } = [];
     public SourcedText PriorSeasonSummary { get; set; } = new(); public SourcedText SeriesExtremes { get; set; } = new(); public SourcedText Storyline { get; set; } = new();
 }
 public sealed class SchedulePayload : SupplementalPayload { public string TeamOrGroup { get; set; } = ""; public List<ScheduleEntry> Games { get; set; } = []; }

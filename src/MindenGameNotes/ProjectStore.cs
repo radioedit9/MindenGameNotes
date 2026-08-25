@@ -12,7 +12,7 @@ public sealed class ProjectStore
     {
         WriteIndented = true,
         PropertyNameCaseInsensitive = true,
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new StrictStatOfWeekDispositionConverter(), new JsonStringEnumConverter() }
     };
 
     public ProjectStore(string? storagePath = null)
@@ -35,7 +35,7 @@ public sealed class ProjectStore
             BuilderWorkspace workspace;
             if (TryGet(root, "SchemaVersion", out var schema))
             {
-                if (!schema.TryGetInt32(out var version) || version is not (1 or 2 or 3 or BuilderWorkspace.CurrentSchemaVersion))
+                if (!schema.TryGetInt32(out var version) || version is not (1 or 2 or 3 or 4 or BuilderWorkspace.CurrentSchemaVersion))
                     throw new InvalidDataException($"Unsupported workspace schema version '{schema}'; expected 1 through {BuilderWorkspace.CurrentSchemaVersion}. The file was not changed.");
                 ValidateCurrentWorkspace(root);
                 if (version == 1 && ContainsWp2Authority(root)) throw new InvalidDataException("A schema-1 workspace cannot contain WP 2 authority fields and was not changed.");
@@ -43,12 +43,12 @@ public sealed class ProjectStore
                 if (version < 4 && ContainsWp4Authority(root)) throw new InvalidDataException($"A schema-{version} workspace cannot contain WP 4 authority fields and was not changed.");
                 if (version >= 2) ValidateNoExplicitNullWp2Collections(root);
                 if (version >= 3) ValidateRequiredWp3Shape(root);
-                if (version == BuilderWorkspace.CurrentSchemaVersion) ValidateRequiredWp4Shape(root);
+                if (version >= 4) ValidateRequiredWp4Shape(root, requireStatOfWeekSelection: version == BuilderWorkspace.CurrentSchemaVersion);
                 try { workspace = JsonSerializer.Deserialize<BuilderWorkspace>(json, JsonOptions) ?? throw new InvalidDataException("The workspace could not be read."); }
                 catch (JsonException ex) { throw new InvalidDataException($"The schema-{version} workspace is invalid and was not changed: {path}", ex); }
                 if (version >= 2) ValidatePersistedWp2IdentityBeforeNormalization(workspace);
                 if (version >= 3) ValidatePersistedWp3IdentityBeforeNormalization(workspace);
-                if (version == 4) ValidatePersistedWp4IdentityBeforeNormalization(workspace);
+                if (version >= 4) ValidatePersistedWp4IdentityBeforeNormalization(workspace);
                 if (version < BuilderWorkspace.CurrentSchemaVersion) workspace.SchemaVersion = BuilderWorkspace.CurrentSchemaVersion;
             }
             else if (IsRecognizableLegacyProject(root))
@@ -209,7 +209,7 @@ public sealed class ProjectStore
         }
     }
 
-    private static void ValidateRequiredWp4Shape(JsonElement root)
+    private static void ValidateRequiredWp4Shape(JsonElement root, bool requireStatOfWeekSelection)
     {
         var projects = Required(root, "Projects", JsonValueKind.Array, "schema-4 workspace");
         foreach (var project in projects.EnumerateArray())
@@ -217,12 +217,12 @@ public sealed class ProjectStore
             var staged = Required(project, "StagedSupplementalSections", JsonValueKind.Array, "schema-4 project");
             var accepted = Required(project, "AcceptedSupplementalSections", JsonValueKind.Array, "schema-4 project");
             var defensiveSelection = Member(project, "DefensiveSeasonTotalsAuthorityId", "schema-4 project"); if (defensiveSelection.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)) throw new InvalidDataException("DefensiveSeasonTotalsAuthorityId must be a GUID or null in schema-4 persistence.");
-            foreach (var section in staged.EnumerateArray()) ValidateSupplementalShape(section, false);
-            foreach (var section in accepted.EnumerateArray()) ValidateSupplementalShape(section, true);
+            foreach (var section in staged.EnumerateArray()) ValidateSupplementalShape(section, false, requireStatOfWeekSelection);
+            foreach (var section in accepted.EnumerateArray()) ValidateSupplementalShape(section, true, requireStatOfWeekSelection);
         }
     }
 
-    private static void ValidateSupplementalShape(JsonElement section, bool accepted)
+    private static void ValidateSupplementalShape(JsonElement section, bool accepted, bool requireStatOfWeekSelection)
     {
         var owner = accepted ? "accepted supplemental section" : "staged supplemental section";
         if (accepted) RequiredMembers(section, owner, "Id", "ProjectId", "StagedSectionId", "Kind", "Season", "Week", "BaselineThroughSeason", "Payload", "Evidence", "AcceptedIssues", "AcceptanceNote", "AcceptedUtc", "IsCurrentAuthority");
@@ -230,19 +230,20 @@ public sealed class ProjectStore
         var payload = Required(section, "Payload", JsonValueKind.Object, owner); var discriminator = Required(payload, "$type", JsonValueKind.String, owner).GetString();
         string[] members = discriminator switch
         {
-            "page1" => ["MindenRecord", "OpponentRecord", "Weather", "OpponentFacts", "SeriesHistory", "WinImplications", "StatsOfWeek", "ByTheNumbers", "PriorSeasonSummary", "SeriesExtremes", "Storyline"],
+            "page1" => requireStatOfWeekSelection ? ["MindenRecord", "OpponentRecord", "Weather", "OpponentFacts", "SeriesHistory", "WinImplications", "StatsOfWeek", "StatOfWeekSelection", "ByTheNumbers", "PriorSeasonSummary", "SeriesExtremes", "Storyline"] : ["MindenRecord", "OpponentRecord", "Weather", "OpponentFacts", "SeriesHistory", "WinImplications", "StatsOfWeek", "ByTheNumbers", "PriorSeasonSummary", "SeriesExtremes", "Storyline"],
             "schedule" => ["TeamOrGroup", "Games"], "ranking" => ["Title", "SourceDate", "Entries", "SourceFooter"], "individual" => ["ProductionLabel", "StatisticalSeason", "Tables"],
             "playerOfGame" => ["Entries"], "coaching" or "program" => ["BaselineThroughSeason", "Sections"], "teamStats" => ["StatisticalSeason", "ReportLabel", "Rows"],
             "nerdNotes" => ["EditorialDirection", "Items"], "roster" => ["Team", "Season", "Players"], _ => throw new InvalidDataException($"Unknown supplemental payload discriminator '{discriminator}'.")
         };
         RequiredMembers(payload, $"{owner} payload", members);
-        ValidateSupplementalPayloadShape(payload, discriminator!, owner);
+        if (discriminator == "page1" && !requireStatOfWeekSelection && TryGet(payload, "StatOfWeekSelection", out _)) throw new InvalidDataException("A schema-4 Page 1 payload cannot carry schema-5 Stat of the Week editorial authority.");
+        ValidateSupplementalPayloadShape(payload, discriminator!, owner, requireStatOfWeekSelection);
         var evidence = Required(section, "Evidence", JsonValueKind.Array, owner); if (evidence.GetArrayLength() == 0) throw new InvalidDataException($"A persisted {owner} must contain evidence.");
         foreach (var item in evidence.EnumerateArray()) { RequiredMembers(item, $"{owner} evidence", "Id", "Kind", "ExpectedDocumentId", "SourceFamilyId", "ImportRecordId", "AuthorityName", "SourceLocator", "SourceAsOfUtc", "ApplicableSeason", "ApplicableWeek", "Note"); Required(item, "Id", JsonValueKind.String, owner); Required(item, "Kind", JsonValueKind.String, owner); Required(item, "AuthorityName", JsonValueKind.String, owner); Required(item, "SourceLocator", JsonValueKind.String, owner); Required(item, "Note", JsonValueKind.String, owner); }
         var issues = Required(section, accepted ? "AcceptedIssues" : "Issues", JsonValueKind.Array, owner); foreach (var issue in issues.EnumerateArray()) ValidateIssueShape(issue, owner);
     }
 
-    private static void ValidateSupplementalPayloadShape(JsonElement payload, string discriminator, string owner)
+    private static void ValidateSupplementalPayloadShape(JsonElement payload, string discriminator, string owner, bool requireStatOfWeekSelection)
     {
         void Text(JsonElement x, string name) => Required(x, name, JsonValueKind.String, owner);
         void Number(JsonElement x, string name) => Required(x, name, JsonValueKind.Number, owner);
@@ -256,6 +257,16 @@ public sealed class ProjectStore
                 var weather = Required(payload, "Weather", JsonValueKind.Object, owner); RequiredMembers(weather, owner, "Temperature", "Sky", "Wind", "EvidenceId"); Text(weather, "Temperature"); Text(weather, "Sky"); Text(weather, "Wind"); Required(weather, "EvidenceId", JsonValueKind.String, owner);
                 var facts = Required(payload, "OpponentFacts", JsonValueKind.Object, owner); Rows(facts, "Rows");
                 foreach (var name in new[] { "SeriesHistory", "WinImplications", "StatsOfWeek", "ByTheNumbers" }) { var list = Required(payload, name, JsonValueKind.Array, owner); foreach (var item in list.EnumerateArray()) Sourced(item); }
+                if (requireStatOfWeekSelection)
+                {
+                    var selection = Member(payload, "StatOfWeekSelection", owner);
+                    if (selection.ValueKind == JsonValueKind.Object)
+                    {
+                        RequiredMembers(selection, owner, "Disposition", "Headline", "DisplayText", "SupportingFactEvidenceIds", "EditorialEvidenceId"); Required(selection, "Disposition", JsonValueKind.String, owner); Text(selection, "Headline"); Text(selection, "DisplayText");
+                        var support = Required(selection, "SupportingFactEvidenceIds", JsonValueKind.Array, owner); foreach (var id in support.EnumerateArray()) if (id.ValueKind != JsonValueKind.String) throw new InvalidDataException("Persisted Stat of the Week support IDs must be GUID strings."); Required(selection, "EditorialEvidenceId", JsonValueKind.String, owner);
+                    }
+                    else if (selection.ValueKind != JsonValueKind.Null) throw new InvalidDataException("StatOfWeekSelection must be an object or null.");
+                }
                 Sourced(Required(payload, "PriorSeasonSummary", JsonValueKind.Object, owner)); Sourced(Required(payload, "SeriesExtremes", JsonValueKind.Object, owner)); Sourced(Required(payload, "Storyline", JsonValueKind.Object, owner)); break;
             case "schedule": Text(payload, "TeamOrGroup"); foreach (var item in Required(payload, "Games", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Date", "Opponent", "Site", "ResultOrTime", "IsDistrictGame", "EvidenceId"); Required(item, "Date", JsonValueKind.String, owner); Text(item, "Opponent"); Text(item, "Site"); Text(item, "ResultOrTime"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
             case "ranking": Text(payload, "Title"); Required(payload, "SourceDate", JsonValueKind.String, owner); Text(payload, "SourceFooter"); foreach (var item in Required(payload, "Entries", JsonValueKind.Array, owner).EnumerateArray()) { RequiredMembers(item, owner, "Rank", "Team", "Record", "Value", "EvidenceId"); Number(item, "Rank"); Text(item, "Team"); Text(item, "Record"); Text(item, "Value"); Required(item, "EvidenceId", JsonValueKind.String, owner); } break;
@@ -521,7 +532,7 @@ public sealed class ProjectStore
             if (document is null || item.SourceFamilyId is not Guid familyId || !families.TryGetValue(familyId, out var family) || document.SourceFamilyId != familyId || import is null || !SupplementalValidation.ImportMatches(import, item, synthetic, document, family)) throw new InvalidDataException("Supplemental evidence has orphaned, inapplicable, or inconsistent source provenance.");
         }
         if (SupplementalValidation.RequiresSource(kind) && !evidence.Any(x => x.Kind == SupplementalEvidenceKind.ExpectedSourceDocument) || kind == SupplementalSectionKind.NerdNotes && !evidence.Any(x => x.Kind == SupplementalEvidenceKind.EditorialDecision)) throw new InvalidDataException("Supplemental evidence does not satisfy the section's authority policy.");
-        if (authority && SupplementalValidation.Validate(synthetic, project).Any(x => x.Severity == InformationIssueSeverity.Blocking)) throw new InvalidDataException("Accepted supplemental authority fails its typed content contract.");
+        if (authority && SupplementalValidation.Validate(synthetic, project).Any(x => x.Severity == InformationIssueSeverity.Blocking && x.Code != "StatOfWeekDispositionMissing")) throw new InvalidDataException("Accepted supplemental authority fails its typed content contract.");
     }
 
     private static void RequireUnique(IEnumerable<Guid> ids, string name)

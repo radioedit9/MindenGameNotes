@@ -4,7 +4,7 @@ namespace MindenGameNotes;
 
 public sealed class BuilderWorkspace
 {
-    public const int CurrentSchemaVersion = 4;
+    public const int CurrentSchemaVersion = 5;
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public Guid? ActiveProjectId { get; set; }
     public List<SourceFamilyConfiguration> SourceFamilies { get; set; } = [];

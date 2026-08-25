@@ -4,7 +4,7 @@ namespace MindenGameNotes;
 
 public sealed class SupplementalInformationWorkflow
 {
-    private static readonly JsonSerializerOptions CloneOptions = new() { Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() } };
+    private static readonly JsonSerializerOptions CloneOptions = new() { Converters = { new StrictStatOfWeekDispositionConverter(), new System.Text.Json.Serialization.JsonStringEnumConverter() } };
 
     public StagedSupplementalSection Stage(GameNotesProject project, SupplementalSectionKind kind, SupplementalPayload payload, IEnumerable<SupplementalEvidence> evidence, int? baselineThroughSeason = null)
     {
@@ -17,12 +17,23 @@ public sealed class SupplementalInformationWorkflow
     public StagedSupplementalSection StageSourceBacked(GameNotesProject project, SupplementalSectionKind kind, SupplementalPayload payload, ExpectedSourceDocument document, SourceFamilyConfiguration family, int? baselineThroughSeason = null)
     {
         if (!SupplementalValidation.RequiresSource(kind) || !project.ExpectedDocuments.Contains(document) || document.SourceFamilyId != family.Id) throw new InvalidOperationException("This typed supplemental section requires a configured source document and family.");
-        document.RefreshStatus(family); var locator = document.ResolvePath(family) ?? "";
-        var import = new ImportRecord { ProjectId = project.Id, SourceFamilyId = family.Id, ExpectedDocumentId = document.Id, FileName = Path.GetFileName(locator), SourceLocator = locator, SourceModifiedUtc = document.SourceModifiedUtc, ApplicableSeason = project.Season, ApplicableWeek = IsSeasonAuthority(kind) ? null : project.Week, ImportedUtc = DateTime.UtcNow, Kind = "SUPPLEMENTAL", RowCount = SupplementalValidation.ItemCount(payload) };
-        project.Imports.Add(import);
-        var evidence = new SupplementalEvidence { Kind = SupplementalEvidenceKind.ExpectedSourceDocument, ExpectedDocumentId = document.Id, SourceFamilyId = family.Id, ImportRecordId = import.Id, SourceLocator = locator, SourceAsOfUtc = import.SourceModifiedUtc, ApplicableSeason = import.ApplicableSeason, ApplicableWeek = import.ApplicableWeek };
+        var evidence = CreateSourceEvidence(project, kind, payload, document, family);
         SupplementalValidation.AssignEvidence(payload, evidence.Id);
         return Stage(project, kind, payload, [evidence], baselineThroughSeason);
+    }
+
+    public StagedSupplementalSection StagePage1(GameNotesProject project, Page1WeeklyFactsPayload payload, ExpectedSourceDocument document, SourceFamilyConfiguration family, string editorialAuthority, string editorialNote)
+    {
+        if (!project.ExpectedDocuments.Contains(document) || document.SourceFamilyId != family.Id) throw new InvalidOperationException("Page 1 requires a configured factual source document and family.");
+        var source = CreateSourceEvidence(project, SupplementalSectionKind.Page1WeeklyFacts, payload, document, family);
+        var editorial = new SupplementalEvidence { Kind = SupplementalEvidenceKind.EditorialDecision, AuthorityName = editorialAuthority, Note = editorialNote, ApplicableSeason = project.Season, ApplicableWeek = project.Week };
+        SupplementalValidation.AssignEvidence(payload, source.Id);
+        if (payload.StatOfWeekSelection is not null)
+        {
+            if (payload.StatOfWeekSelection.EditorialEvidenceId == Guid.Empty) payload.StatOfWeekSelection.EditorialEvidenceId = editorial.Id;
+            for (var i = 0; i < payload.StatOfWeekSelection.SupportingFactEvidenceIds.Count; i++) if (payload.StatOfWeekSelection.SupportingFactEvidenceIds[i] == Guid.Empty) payload.StatOfWeekSelection.SupportingFactEvidenceIds[i] = source.Id;
+        }
+        return Stage(project, SupplementalSectionKind.Page1WeeklyFacts, payload, [source, editorial]);
     }
 
     public StagedSupplementalSection StageEditorial(GameNotesProject project, NerdNotesPayload payload, string authorityName, string evidenceNote)
@@ -30,6 +41,14 @@ public sealed class SupplementalInformationWorkflow
         var evidence = new SupplementalEvidence { Kind = SupplementalEvidenceKind.EditorialDecision, AuthorityName = authorityName, Note = evidenceNote, ApplicableSeason = project.Season, ApplicableWeek = project.Week };
         SupplementalValidation.AssignEvidence(payload, evidence.Id);
         return Stage(project, SupplementalSectionKind.NerdNotes, payload, [evidence]);
+    }
+
+    private static SupplementalEvidence CreateSourceEvidence(GameNotesProject project, SupplementalSectionKind kind, SupplementalPayload payload, ExpectedSourceDocument document, SourceFamilyConfiguration family)
+    {
+        document.RefreshStatus(family); var locator = document.ResolvePath(family) ?? "";
+        var import = new ImportRecord { ProjectId = project.Id, SourceFamilyId = family.Id, ExpectedDocumentId = document.Id, FileName = Path.GetFileName(locator), SourceLocator = locator, SourceModifiedUtc = document.SourceModifiedUtc, ApplicableSeason = project.Season, ApplicableWeek = IsSeasonAuthority(kind) ? null : project.Week, ImportedUtc = DateTime.UtcNow, Kind = "SUPPLEMENTAL", RowCount = SupplementalValidation.ItemCount(payload) };
+        project.Imports.Add(import);
+        return new SupplementalEvidence { Kind = SupplementalEvidenceKind.ExpectedSourceDocument, ExpectedDocumentId = document.Id, SourceFamilyId = family.Id, ImportRecordId = import.Id, SourceLocator = locator, SourceAsOfUtc = import.SourceModifiedUtc, ApplicableSeason = import.ApplicableSeason, ApplicableWeek = import.ApplicableWeek };
     }
 
     public static SupplementalPayload ParsePayload(SupplementalSectionKind kind, string json)
@@ -131,6 +150,20 @@ internal static class SupplementalValidation
         {
             foreach (var id in Page1SourceEvidenceIds(page1).Where(id => section.Evidence.FirstOrDefault(x => x.Id == id)?.Kind != SupplementalEvidenceKind.ExpectedSourceDocument))
                 Block("Page1FactualEvidenceRequired", $"Page 1 factual field evidence {id} is not valid source-backed evidence.");
+            var selection = page1.StatOfWeekSelection;
+            if (selection is null) Block("StatOfWeekDispositionMissing", "Stat of the Week requires an explicit Selected or NoSelection editorial disposition.");
+            else
+            {
+                if (section.Evidence.FirstOrDefault(x => x.Id == selection.EditorialEvidenceId)?.Kind != SupplementalEvidenceKind.EditorialDecision) Block("StatOfWeekEditorialEvidenceRequired", "Stat of the Week disposition requires explicit editorial evidence.");
+                if (!Enum.IsDefined(selection.Disposition)) Block("StatOfWeekDispositionInvalid", "Stat of the Week disposition must be Selected or NoSelection.");
+                else if (selection.Disposition == StatOfWeekDisposition.Selected)
+                {
+                    if (Placeholder(selection.Headline) || Placeholder(selection.DisplayText)) Block("StatOfWeekEditorialContentMissing", "A selected Stat of the Week requires a headline and display text.");
+                    if (selection.SupportingFactEvidenceIds.Count == 0) Block("StatOfWeekFactualSupportMissing", "A selected Stat of the Week requires at least one supporting factual reference.");
+                    foreach (var id in selection.SupportingFactEvidenceIds.Where(id => !page1.StatsOfWeek.Any(x => x.EvidenceId == id && !Placeholder(x.Value)))) Block("StatOfWeekFactualSupportOrphan", $"Stat of the Week support {id} does not reference a valid Page 1 statistical fact.");
+                }
+                else if (!string.IsNullOrWhiteSpace(selection.Headline) || !string.IsNullOrWhiteSpace(selection.DisplayText) || selection.SupportingFactEvidenceIds.Count != 0) Block("StatOfWeekNoSelectionContent", "NoSelection cannot contain a fabricated selected statistic or factual support.");
+            }
         }
         if (section.Payload is IndividualStatsPayload individual && individual.StatisticalSeason != (project.Week == 1 ? project.Season - 1 : project.Season)) Block("StatisticalSeasonMismatch", "Individual production does not match the required statistical season.");
         if (section.Payload is TeamStatisticsReportPayload team && team.StatisticalSeason != (project.Week == 1 ? project.Season - 1 : project.Season)) Block("StatisticalSeasonMismatch", "Team statistics do not match the required statistical season.");
@@ -183,7 +216,7 @@ internal static class SupplementalValidation
     };
     internal static bool IsEmpty(SupplementalPayload payload) => payload switch
     {
-        Page1WeeklyFactsPayload p => Placeholder(p.MindenRecord.Value) || Placeholder(p.OpponentRecord.Value) || Placeholder(p.Weather.Temperature) || Placeholder(p.Weather.Sky) || Placeholder(p.Weather.Wind) || p.OpponentFacts.Rows.Count == 0 || p.SeriesHistory.Count == 0 || p.WinImplications.Count == 0 || p.StatsOfWeek.Count == 0 || p.ByTheNumbers.Count == 0 || Placeholder(p.PriorSeasonSummary.Value) || Placeholder(p.SeriesExtremes.Value) || Placeholder(p.Storyline.Value),
+        Page1WeeklyFactsPayload p => Placeholder(p.MindenRecord.Value) || Placeholder(p.OpponentRecord.Value) || Placeholder(p.Weather.Temperature) || Placeholder(p.Weather.Sky) || Placeholder(p.Weather.Wind) || p.OpponentFacts.Rows.Count == 0 || p.SeriesHistory.Count == 0 || p.WinImplications.Count == 0 || p.ByTheNumbers.Count == 0 || Placeholder(p.PriorSeasonSummary.Value) || Placeholder(p.SeriesExtremes.Value) || Placeholder(p.Storyline.Value),
         SchedulePayload p => Placeholder(p.TeamOrGroup) || p.Games.Count == 0 || p.Games.Any(x => x.Date == default || Placeholder(x.Opponent) || Placeholder(x.Site) || Placeholder(x.ResultOrTime)),
         RankingSnapshotPayload p => Placeholder(p.Title) || p.SourceDate == default || p.Entries.Count == 0 || p.Entries.Any(x => x.Rank <= 0 || Placeholder(x.Team)),
         IndividualStatsPayload p => Placeholder(p.ProductionLabel) || p.StatisticalSeason is < 1900 or > 2200 || p.Tables.Count == 0 || p.Tables.Any(x => Placeholder(x.Title) || x.Columns.Count == 0 || x.Rows.Count == 0),
@@ -198,7 +231,7 @@ internal static class SupplementalValidation
     private static bool Placeholder(string value) => string.IsNullOrWhiteSpace(value) || value.Contains("TBD", StringComparison.OrdinalIgnoreCase) || value.Contains("VERIFY", StringComparison.OrdinalIgnoreCase) || value.Contains("Add this", StringComparison.OrdinalIgnoreCase);
     private static IEnumerable<Guid> ReferencedEvidence(SupplementalPayload payload) => payload switch
     {
-        Page1WeeklyFactsPayload p => new[] { p.MindenRecord.EvidenceId, p.OpponentRecord.EvidenceId, p.Weather.EvidenceId, p.PriorSeasonSummary.EvidenceId, p.SeriesExtremes.EvidenceId, p.Storyline.EvidenceId }.Concat(p.OpponentFacts.Rows.Select(x => x.EvidenceId)).Concat(p.SeriesHistory.Select(x => x.EvidenceId)).Concat(p.WinImplications.Select(x => x.EvidenceId)).Concat(p.StatsOfWeek.Select(x => x.EvidenceId)).Concat(p.ByTheNumbers.Select(x => x.EvidenceId)),
+        Page1WeeklyFactsPayload p => new[] { p.MindenRecord.EvidenceId, p.OpponentRecord.EvidenceId, p.Weather.EvidenceId, p.PriorSeasonSummary.EvidenceId, p.SeriesExtremes.EvidenceId, p.Storyline.EvidenceId }.Concat(p.OpponentFacts.Rows.Select(x => x.EvidenceId)).Concat(p.SeriesHistory.Select(x => x.EvidenceId)).Concat(p.WinImplications.Select(x => x.EvidenceId)).Concat(p.StatsOfWeek.Select(x => x.EvidenceId)).Concat(p.ByTheNumbers.Select(x => x.EvidenceId)).Concat(p.StatOfWeekSelection is null ? [] : p.StatOfWeekSelection.SupportingFactEvidenceIds.Append(p.StatOfWeekSelection.EditorialEvidenceId)),
         SchedulePayload p => p.Games.Select(x => x.EvidenceId), RankingSnapshotPayload p => p.Entries.Select(x => x.EvidenceId),
         IndividualStatsPayload p => p.Tables.SelectMany(x => x.Rows).Select(x => x.EvidenceId), PlayerOfGamePayload p => p.Entries.Select(x => x.EvidenceId),
         CoachingHistoryBaselinePayload p => p.Sections.SelectMany(x => x.Rows).Select(x => x.EvidenceId), ProgramHistoryBaselinePayload p => p.Sections.SelectMany(x => x.Rows).Select(x => x.EvidenceId),
@@ -264,9 +297,11 @@ public static class WeeklyGameNotesInformationAssembler
             Refresh(sourceDocuments);
             var sourceChanged = accepted.Evidence.Where(x => x.Kind == SupplementalEvidenceKind.ExpectedSourceDocument).Any(e => project.ExpectedDocuments.FirstOrDefault(d => d.Id == e.ExpectedDocumentId)?.SourceModifiedUtc != e.SourceAsOfUtc);
             var healthAvailability = sourceDocuments.Any(x => x.Status == SourceDocumentStatus.Missing) ? InformationAvailability.Missing : sourceChanged || sourceDocuments.Any(x => x.Status == SourceDocumentStatus.Stale) ? InformationAvailability.Stale : sourceDocuments.Any(x => !x.HasHealthySource) ? InformationAvailability.Missing : sourceDocuments.Any(x => x.Verification != DocumentVerificationState.Verified) ? InformationAvailability.Unverified : InformationAvailability.Accepted;
-            var severity = accepted.AcceptedIssues.Any(x => x.Severity == InformationIssueSeverity.Blocking) || healthAvailability is InformationAvailability.Stale or InformationAvailability.Missing or InformationAvailability.Unverified ? ReadinessSeverity.Blocking : accepted.AcceptedIssues.Any(x => x.Severity == InformationIssueSeverity.Advisory) ? ReadinessSeverity.Advisory : ReadinessSeverity.Ready;
+            var unresolvedStatSelection = kind == SupplementalSectionKind.Page1WeeklyFacts && accepted.Payload is Page1WeeklyFactsPayload { StatOfWeekSelection: null };
+            var severity = unresolvedStatSelection || accepted.AcceptedIssues.Any(x => x.Severity == InformationIssueSeverity.Blocking) || healthAvailability is InformationAvailability.Stale or InformationAvailability.Missing or InformationAvailability.Unverified ? ReadinessSeverity.Blocking : accepted.AcceptedIssues.Any(x => x.Severity == InformationIssueSeverity.Advisory) ? ReadinessSeverity.Advisory : ReadinessSeverity.Ready;
             var authorities = accepted.Evidence.Count == 0 ? [Ref(accepted)] : accepted.Evidence.Select(x => new AuthorityReference(AuthorityDomain.AcceptedSupplementalSection, accepted.Id, accepted.StagedSectionId, x.ImportRecordId, x.ExpectedDocumentId, x.SourceFamilyId, accepted.AcceptedUtc)).ToList();
-            statuses.Add(new($"P{page}.{kind}", label, RequirementDisposition.Required, healthAvailability, severity, healthAvailability == InformationAvailability.Accepted ? "Accepted authority available." : "Accepted authority is retained, but current source health/verification blocks weekly readiness.", authorities, sourceDocuments.Select(x => x.Id).ToList()));
+            var message = unresolvedStatSelection ? "Page 1 facts are retained, but Stat of the Week editorial disposition is unresolved." : healthAvailability == InformationAvailability.Accepted ? "Accepted authority available." : "Accepted authority is retained, but current source health/verification blocks weekly readiness.";
+            statuses.Add(new($"P{page}.{kind}", label, RequirementDisposition.Required, healthAvailability, severity, message, authorities, sourceDocuments.Select(x => x.Id).ToList()));
         }
         void Refresh(IEnumerable<ExpectedSourceDocument> documents)
         {

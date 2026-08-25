@@ -338,7 +338,8 @@ public partial class MainWindow : Window
             else
             {
                 if (SupplementalSourcePicker.SelectedItem is not ExpectedSourceDocument document) throw new InvalidOperationException("Select the expected source document for this factual section."); var family = workspace.SourceFamilies.SingleOrDefault(x => x.Id == document.SourceFamilyId) ?? throw new InvalidOperationException("The source family is unavailable.");
-                int? baseline = int.TryParse(SupplementalBaseline.Text, out var parsed) ? parsed : null; staged = supplementalWorkflow.StageSourceBacked(project, kind, payload, document, family, baseline);
+                int? baseline = int.TryParse(SupplementalBaseline.Text, out var parsed) ? parsed : null;
+                staged = kind == SupplementalSectionKind.Page1WeeklyFacts ? supplementalWorkflow.StagePage1(project, (Page1WeeklyFactsPayload)payload, document, family, SupplementalEditorialAuthority.Text, SupplementalEvidenceNote.Text) : supplementalWorkflow.StageSourceBacked(project, kind, payload, document, family, baseline);
             }
             await store.SaveAsync(workspace); SetProject(); SupplementalSectionsGrid.SelectedItem = staged; StatusText.Text = "Typed supplemental information staged for review";
         }
@@ -351,7 +352,7 @@ public partial class MainWindow : Window
         try { project.DefensiveSeasonTotalsAuthorityId = totals.Id; await store.SaveAsync(workspace); SetProject(); StatusText.Text = "WP 3 TOTALS authority explicitly linked for weekly assembly"; } catch (Exception ex) { ShowError(ex); }
     }
 
-    private static JsonSerializerOptions ReviewJsonOptions() => new() { WriteIndented = true, ReferenceHandler = ReferenceHandler.IgnoreCycles, Converters = { new JsonStringEnumConverter() } };
+    private static JsonSerializerOptions ReviewJsonOptions() => new() { WriteIndented = true, ReferenceHandler = ReferenceHandler.IgnoreCycles, Converters = { new StrictStatOfWeekDispositionConverter(), new JsonStringEnumConverter() } };
 
     private async void AcceptSupplemental_Click(object sender, RoutedEventArgs e) => await ReviewSupplemental(false);
     private async void ReplaceSupplemental_Click(object sender, RoutedEventArgs e) => await ReviewSupplemental(true);
