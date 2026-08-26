@@ -29,6 +29,15 @@ public sealed record StatisticalTable(string Key, SourceStatTable Content, Compo
 public sealed record ComparativeStatTable(string Key, IReadOnlyList<string> Columns, IReadOnlyList<ReportedTeamStatisticRow> Rows, CompositionRegion Region);
 public sealed record HistoricalReferenceBlock(string Key, BaselineSection Content, CompositionRegion Region);
 public sealed record EditorialFeature(int SourceIndex, NerdNoteItem Content, CompositionRegion Region);
+public sealed record CompositionVisibleRow(IReadOnlyList<string> Cells);
+public sealed record Page2ScheduleRow(IReadOnlyList<string> Cells, bool IsDistrictGame);
+public sealed record Page2ScheduleComposition(string Key, string Title, bool HasAuthority, IReadOnlyList<string> Columns, IReadOnlyList<Page2ScheduleRow> Rows, IReadOnlyList<string> Details, CompositionRegion Region);
+public sealed record Page2RankingComposition(string Key, string Title, bool HasAuthority, IReadOnlyList<string> Columns, IReadOnlyList<CompositionVisibleRow> Rows, IReadOnlyList<string> Details, CompositionRegion Region);
+public enum Page3IndividualStatisticsRole { Unknown, Offense, SpecialTeams }
+public sealed record Page3IndividualStatisticsComposition(string Key, string Heading, Page3IndividualStatisticsRole Role, IReadOnlyList<string> Columns, IReadOnlyList<CompositionVisibleRow> Rows, CompositionRegion Region);
+public sealed record Page3DefenseComposition(string Key, string Heading, bool HasAuthority, bool HasConflict, IReadOnlyList<string> Columns, IReadOnlyList<CompositionVisibleRow> Rows, CompositionRegion Region);
+public sealed record Page3PlayerOfGameComposition(string Key, string Heading, bool HasAuthority, IReadOnlyList<string> Columns, IReadOnlyList<CompositionVisibleRow> Rows, CompositionRegion Region);
+public sealed record Page3RosterReferenceComposition(string Key, string Heading, bool HasAuthority, IReadOnlyList<string> Columns, IReadOnlyList<CompositionVisibleRow> Rows, CompositionRegion Region);
 public sealed record CompositionPageContext(int PageNumber, string Purpose, PageProductionState ProductionState, bool PublicationReady, PageShell Shell, IReadOnlyList<CompositionRegion> Regions, IReadOnlyList<CompositionDiagnostic> Diagnostics, IReadOnlyList<string> ChangedRequirementKeys)
 {
     public bool IsRenderReady => PublicationReady && Diagnostics.All(x => x.Severity != CompositionSeverity.Blocking);
@@ -46,8 +55,8 @@ public sealed record Page1QuickFactsComposition(string MindenRecord, string Oppo
 public sealed record Page1StatOfWeekComposition(PublicationStatOfWeekState State, string Headline, string DisplayText, IReadOnlyList<string> SupportingFacts, PublicationEvidenceReference? EditorialEvidence, CompositionRegion Region);
 public sealed record Page1WeeklyReferencesComposition(IReadOnlyList<string> SeriesHistory, IReadOnlyList<string> WinImplications, string SeriesExtremes, string Storyline, CompositionRegion Region);
 public sealed record Page1Composition(CompositionPageContext Context, Page1Traceability Traceability, Page1GameIdentityComposition GameIdentity, Page1LookingBackComposition? LookingBack, Page1OpponentInformationComposition OpponentInformation, Page1QuickFactsComposition MindenQuickFacts, Page1StatOfWeekComposition StatOfWeek, Page1WeeklyReferencesComposition WeeklyReferences) : IGameNotesPageComposition;
-public sealed record Page2Composition(Page2PublicationSupply Source, CompositionPageContext Context, IReadOnlyList<PublicationTable<SchedulePayload>> Schedules, IReadOnlyList<PublicationTable<RankingSnapshotPayload>> Rankings) : IGameNotesPageComposition;
-public sealed record Page3Composition(Page3PublicationSupply Source, CompositionPageContext Context, IReadOnlyList<StatisticalTable> OffenseSpecialTeams, CompositionRegion Defense, CompositionRegion PlayerOfGame, CompositionRegion RosterIdentity) : IGameNotesPageComposition;
+public sealed record Page2Composition(Page2PublicationSupply Source, CompositionPageContext Context, IReadOnlyList<PublicationTable<SchedulePayload>> Schedules, IReadOnlyList<PublicationTable<RankingSnapshotPayload>> Rankings, IReadOnlyList<Page2ScheduleComposition> VisibleSchedules, IReadOnlyList<Page2RankingComposition> VisibleRankings) : IGameNotesPageComposition;
+public sealed record Page3Composition(Page3PublicationSupply Source, CompositionPageContext Context, IReadOnlyList<StatisticalTable> OffenseSpecialTeams, CompositionRegion Defense, CompositionRegion PlayerOfGame, CompositionRegion RosterIdentity, bool HasIndividualStatisticsAuthority, string ProductionLabel, int? StatisticalSeason, IReadOnlyList<Page3IndividualStatisticsComposition> VisibleIndividualStatistics, Page3DefenseComposition VisibleDefense, Page3PlayerOfGameComposition VisiblePlayerOfGame, Page3RosterReferenceComposition VisibleRosterReference) : IGameNotesPageComposition;
 public sealed record Page4Composition(Page4PublicationSupply Source, CompositionPageContext Context, IReadOnlyList<HistoricalReferenceBlock> HistoricalBlocks) : IGameNotesPageComposition;
 public sealed record Page5Composition(Page5PublicationSupply Source, CompositionPageContext Context, IReadOnlyList<HistoricalReferenceBlock> HistoricalBlocks) : IGameNotesPageComposition;
 public sealed record Page6Composition(Page6PublicationSupply Source, CompositionPageContext Context, ComparativeStatTable TeamStatistics) : IGameNotesPageComposition;
